@@ -1,4 +1,5 @@
 import { parseRoomLink, fileSize } from '/protocol.js';
+import { ImageDrafts, createImagePasteHandler } from '/clipboard-images.js';
 
 const $ = id => document.getElementById(id);
 const bridge = window.pickdrop;
@@ -6,6 +7,8 @@ let config, socket, epoch = 0, reconnectTimer, toastTimer, dropDepth = 0, prepar
 let pendingTicket, pendingTimer, requestsLoading = false, groupsLoading = false;
 let state = { messages: [], devices: [] }, groups = [], requests = [], online = false, panelKind = '', inviteTimer;
 const ready = new Map(), prepareQueue = [];
+const imageDrafts = new ImageDrafts();
+let sendingComposer = false;
 const messageNodes = new Map();
 const element = (tag, className, text) => {
   const node = document.createElement(tag); if (className) node.className = className;
@@ -19,7 +22,7 @@ function action(label, callback, className = '', id = '') {
 }
 function busy() {
   const inputFocused = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
-  bridge?.setInteractionBusy?.(Boolean($('panel').open || !$('group-menu').hidden || inputFocused || document.querySelector('.file-more[open]') || dropDepth || uploading));
+  bridge?.setInteractionBusy?.(Boolean($('panel').open || !$('group-menu').hidden || inputFocused || document.querySelector('.file-more[open]') || dropDepth || uploading || imageDrafts.items.length));
 }
 function groupName() { return config?.room?.name || '我的文件'; }
 function connection(value) { online = value; renderConnection(); }
@@ -250,34 +253,72 @@ async function join() {
   connect();
 }
 async function sendText() {
-  const input = $('message-input'), text = input.value.trim(); if (!text || $('send-text').disabled || !config) return;
+  const input = $('message-input'), text = input.value.trim(); if (!text) return true; if ($('send-text').disabled || !config) return false;
   $('send-text').disabled = true;
-  try { await api('/api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }); if (input.value.trim() === text) input.value = ''; }
-  catch (error) { showError(error); } finally { $('send-text').disabled = false; }
+  try { await api('/api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }); if (input.value.trim() === text) input.value = ''; return true; }
+  catch (error) { showError(error); return false; } finally { $('send-text').disabled = false; }
 }
 function upload(file) {
   return new Promise(resolve => {
-    if (file.size > (state.maxFileBytes || 8 * 1024 ** 3)) { toast(`${file.name} 超过当前大小上限`); resolve(); return; }
+    if (file.size > (state.maxFileBytes || 8 * 1024 ** 3)) { toast(`${file.name} 超过当前大小上限`); resolve(false); return; }
     const row = element('div', 'upload'); row.append(element('span', 'upload-name', file.name));
     const progress = element('progress'); progress.max = 100; progress.value = 0; const percent = element('span', '', '0%'); row.append(progress, percent); $('uploads').append(row);
     const xhr = new XMLHttpRequest(); xhr.open('POST', `${config.room.baseUrl}/api/files?name=${encodeURIComponent(file.name)}`);
     xhr.setRequestHeader('X-Room-Key', config.room.key); xhr.setRequestHeader('X-Device-Id', config.device.id); xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
     xhr.upload.onprogress = event => { if (event.lengthComputable) { progress.value = Math.round(event.loaded / event.total * 100); percent.textContent = progress.value < 100 ? `${progress.value}%` : '确认中'; } };
     row.append(action('取消', () => xhr.abort()));
-    xhr.onload = () => { if (!(xhr.status >= 200 && xhr.status < 300)) { try { toast(JSON.parse(xhr.responseText).error || '文件发送失败'); } catch { toast('文件发送失败'); } } row.remove(); resolve(); };
-    xhr.onerror = () => { toast(`${file.name} 发送失败，请检查连接`); row.remove(); resolve(); }; xhr.onabort = () => { toast('已取消发送'); row.remove(); resolve(); }; xhr.send(file);
+    xhr.onload = () => { if (!(xhr.status >= 200 && xhr.status < 300)) { try { toast(JSON.parse(xhr.responseText).error || '文件发送失败'); } catch { toast('文件发送失败'); } } row.remove(); resolve(xhr.status >= 200 && xhr.status < 300); };
+    xhr.onerror = () => { toast(`${file.name} 发送失败，请检查连接`); row.remove(); resolve(false); }; xhr.onabort = () => { toast('已取消发送'); row.remove(); resolve(false); }; xhr.send(file);
   });
 }
 async function sendFiles(files) {
-  if (!config || !files.length) return;
+  if (!config || !files.length) return [];
+  const successful = [];
   let leased = false, counted = false;
   try {
     if (bridge?.setTransferBusy) { await bridge.setTransferBusy(true); leased = true; }
     uploading++; counted = true; busy();
-    for (const file of files) await upload(file);
+    for (const file of files) if (await upload(file)) successful.push(file);
   } catch (error) { showError(error); }
   finally { if (counted) uploading--; if (leased) await bridge.setTransferBusy(false).catch(() => {}); busy(); }
+  return successful;
 }
+function renderImageDrafts() {
+  $('image-drafts').hidden = !imageDrafts.items.length;
+  $('image-draft-summary').textContent = `${imageDrafts.items.length} 张图片待发送 · Enter 发送`;
+  $('image-draft-list').replaceChildren(...imageDrafts.items.map(item => {
+    const card = element('div', 'image-draft'), image = element('img');
+    image.src = item.url; image.alt = item.file.name; image.onerror = () => { image.hidden = true; };
+    const label = element('span', '', item.file.name); label.title = item.file.name;
+    const remove = action('×', () => { imageDrafts.remove(item.id); renderImageDrafts(); $('message-input').focus(); });
+    remove.setAttribute('aria-label', `移除图片 ${item.file.name}`); remove.disabled = sendingComposer;
+    card.append(image, label, remove); return card;
+  }));
+  const label = imageDrafts.items.length ? '发送图片和消息' : '发送消息';
+  $('send-text').setAttribute('aria-label', label); $('send-text').title = label;
+  busy();
+}
+async function sendComposer() {
+  if (sendingComposer || !config) return;
+  sendingComposer = true;
+  const batch = [...imageDrafts.items];
+  renderImageDrafts();
+  try {
+    if (!await sendText()) return;
+    $('send-text').disabled = true; renderImageDrafts();
+    const sent = await sendFiles(batch.map(item => item.file));
+    for (const item of batch) if (sent.includes(item.file)) imageDrafts.remove(item.id);
+    if (sent.length < batch.length) toast('未发送的图片已保留，可重试或移除');
+  } finally { sendingComposer = false; $('send-text').disabled = false; renderImageDrafts(); }
+}
+window.addEventListener('paste', createImagePasteHandler({
+  canPaste: event => Boolean(config && !$('panel').open && (event.target === $('message-input') || !event.target?.closest?.('input,textarea,[contenteditable]'))),
+  context: () => `${epoch}:${config?.room?.id}`,
+  readNative: bridge?.readClipboardImage ? () => bridge.readClipboardImage() : undefined,
+  onImages: files => { imageDrafts.add(files); renderImageDrafts(); $('message-input').focus(); },
+  onError: showError,
+}));
+window.addEventListener('beforeunload', () => imageDrafts.clear());
 function closeMenu() { $('group-menu').hidden = true; $('group-menu-button').setAttribute('aria-expanded', 'false'); busy(); }
 async function refreshGroups() {
   if (bridge?.listGroups) { const result = await bridge.listGroups(); groups = Array.isArray(result) ? result : result.groups || []; }
@@ -461,7 +502,7 @@ $('view-join-requests').onclick = openRequests;
 $('close-panel').onclick = () => $('panel').close(); $('panel').addEventListener('close', () => { panelKind = ''; clearInterval(inviteTimer); busy(); });
 $('panel').addEventListener('click', event => { if (event.target === $('panel')) { const rect = $('panel').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('panel').close(); } });
 $('choose-file').onclick = () => $('file-input').click(); $('file-input').onchange = event => { sendFiles(Array.from(event.target.files)); event.target.value = ''; };
-$('composer').onsubmit = event => { event.preventDefault(); sendText(); }; $('message-input').onkeydown = event => { if (event.key === 'Enter' && event.isComposing) event.preventDefault(); };
+$('composer').onsubmit = event => { event.preventDefault(); sendComposer().catch(showError); }; $('message-input').onkeydown = event => { if (event.key === 'Enter' && event.isComposing) event.preventDefault(); };
 $('pin-button').onclick = async () => { try { const next = await bridge?.pin?.(!config.window.pinned); if (next) windowState(next); } catch (error) { showError(error); } };
 $('dock-button').onclick = () => { closeMenu(); document.activeElement?.blur(); bridge?.dock?.(); }; $('close-button').onclick = () => bridge?.close?.();
 document.addEventListener('pointerdown', event => { document.querySelectorAll('.file-more[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; }); if (!$('group-menu').contains(event.target) && !$('group-menu-button').contains(event.target)) closeMenu(); });

@@ -2,14 +2,16 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { terminalText, progressLabel } from './common.js';
 import { fileSize } from '../../shared/protocol.js';
-import { cells, clipText, wrapText, getLayout, groupTransfers, taskStatus, messageLines } from './layout.js';
+import { navigationPalette } from './navigation-view.js';
+import { graphemes, cells, clipText, wrapText, getLayout, groupTransfers, taskStatus, messageLines } from './layout.js';
 const h = React.createElement;
-export const theme = { base: '#0B1318', panel: '#101D23', text: '#DCE8EA', muted: '#8CA2AA', accent: '#3ED6BE', selected: '#16473F', border: '#34545F', warning: '#EDBF72' };
+const palette = navigationPalette();
+export const theme = { ...palette, panel: palette.base, border: palette.edge };
 const row = (text, tone, extra = {}) => ({ text, tone, ...extra });
 function line(value, width, key, background = theme.panel) {
   const entry = typeof value === 'string' ? row(value) : value || row('');
   const content = clipText(entry.text, width), padded = content + ' '.repeat(Math.max(0, width - cells(content)));
-  return h(Text, { key, color: theme[entry.tone] || theme.text, backgroundColor: entry.selected ? theme.selected : background, bold: entry.bold, wrap: 'truncate-end' }, padded);
+  return h(Text, { key, color: entry.selected ? theme.selectedText || theme.accent : theme[entry.tone] || theme.text, backgroundColor: entry.selected ? theme.selected : background, bold: entry.bold, wrap: 'truncate-end' }, padded);
 }
 function panel(title, content, width, height, focused = false) {
   const inside = width - 4, border = focused ? 'accent' : 'border';
@@ -18,7 +20,7 @@ function panel(title, content, width, height, focused = false) {
     const value = clipText(entry.text, inside), background = entry.selected ? theme.selected : theme.panel;
     return h(Text, { key, backgroundColor: background, wrap: 'truncate-end' },
       h(Text, { color: theme[border] }, '│ '),
-      h(Text, { color: entry.color || theme[entry.tone] || theme.text, backgroundColor: entry.background, bold: entry.bold }, value + ' '.repeat(Math.max(0, inside - cells(value)))),
+      h(Text, { color: entry.color || (entry.selected ? theme.selectedText || theme.accent : theme[entry.tone] || theme.text), backgroundColor: entry.background, bold: entry.bold }, value + ' '.repeat(Math.max(0, inside - cells(value)))),
       h(Text, { color: theme[border] }, ' │'));
   };
   rows.push(bordered(row(title, focused ? 'accent' : 'text', { bold: true }), 'title'));
@@ -35,8 +37,8 @@ export function chatViewport(snapshot, current, layout) {
   const taskRows = layout.kind !== 'wide' && featured ? 2 : 0;
   return { tasks, featured, capacity: Math.max(1, layout.contentHeight - taskRows), taskRows };
 }
-const titles = { actions: '操作菜单', create: '创建群 · 输入群名称', join: '加入群 · 粘贴完整邀请链接', code: '加入群 · 输入 6 位邀请码', groups: '我的传输群', nearby: '附近的群 · 同一局域网', networks: '传输网络', filepath: '输入文件路径 · Enter 浏览 / Tab 补全', files: '选择文件发送', downloads: '选择下载文件', destination: '保存到 · 输入目录', requests: '加入申请 · Enter 允许 / D 拒绝', tasks: '当前群任务 · C 取消 / R 重试', devices: '当前群设备', invite: '邀请设备加入', help: '快捷键与说明' };
-export const helpText = 'Ctrl+P 操作菜单   Ctrl+G 切换群   Ctrl+O 发文件\nEnter 发送 / 确认   Esc 返回   Ctrl+U 清空输入\nPageUp / PageDown 浏览历史和长内容\n文件选择：↑↓ 移动，Enter 进入目录，空格多选，Ctrl+S 发送\nCtrl+L 输入路径，Tab 补全；SSH 选择的是远端机器的文件。\n下载同名文件自动另存，完成后校验 SHA-256。\n已存入群主机表示上传成功；其他设备需主动下载。\n后台已运行时 Ctrl+C 只退出界面，默认启动退出会停止服务。\npickdrop stop 停止后台；服务重启会中断待处理传输。';
+const titles = { settings: '默认保存位置 · 输入目录', 'task-actions': '任务操作 · Enter 确认', 'request-actions': '加入申请 · Enter 确认', actions: '操作菜单', create: '创建群 · 输入群名称', join: '加入群 · 粘贴完整邀请链接', code: '加入群 · 输入 6 位邀请码', groups: '我的传输群', nearby: '附近的群 · 同一局域网', networks: '传输网络', filepath: '输入文件路径 · Enter 浏览 / Tab 补全', files: '选择文件发送', downloads: '选择下载文件', destination: '保存到 · 输入目录', requests: '加入申请 · → 操作', tasks: '当前群任务 · → 操作', devices: '当前群设备', invite: '邀请设备加入', help: '快捷键与说明' };
+export const helpText = '↑↓ 选择消息，←→ 切换工作空间 / 消息 / 操作区域\n工作空间选中即联动；下载、发送、保存按 Enter 确认\n工作空间的发送消息进入编辑；Esc 保留草稿返回\nCtrl+P 操作菜单   Ctrl+G 切换群   Ctrl+O 发文件\nEnter 发送 / 确认   Esc 返回   Ctrl+U 清空输入\nPageUp / PageDown 浏览历史和长内容\n文件选择：↑↓ 移动，Enter 进入目录，空格多选，Ctrl+S 发送\nCtrl+L 输入路径，Tab 补全；SSH 选择的是远端机器的文件。\n下载同名文件自动另存，完成后校验 SHA-256。\n已存入群主机表示上传成功；其他设备需主动下载。\n后台已运行时 Ctrl+C 只退出界面，默认启动退出会停止服务。\npickdrop stop 停止后台；服务重启会中断待处理传输。';
 export function modeLines({ mode, target, qr, items = [], index = 0, selected = [], snapshot, width, height = Infinity }) {
   const expand = (value, tone) => wrapText(value, width).map(text => row(text, tone));
   if (mode === 'invite') {
@@ -47,17 +49,17 @@ export function modeLines({ mode, target, qr, items = [], index = 0, selected = 
     return output;
   }
   if (mode === 'help') return expand(helpText);
-  if (['create', 'join', 'code', 'destination', 'filepath'].includes(mode)) return expand(({ create: '例如：我的传输群', destination: '同名文件会自动另存。成功加入下载队列后记住此目录。', filepath: '输入本机路径，按 Tab 补全，Enter 浏览。', join: '粘贴完整邀请链接；加入申请需要已有群成员确认。', code: '输入邀请码，等待群成员批准。' })[mode], 'muted');
+  if (['create', 'join', 'code', 'destination', 'settings', 'filepath'].includes(mode)) return expand(({ settings: '设置默认下载目录，Enter 保存；不需要先下载文件。', create: '例如：我的传输群', destination: '同名文件会自动另存。成功加入下载队列后记住此目录。', filepath: '输入本机路径，按 Tab 补全，Enter 浏览。', join: '粘贴完整邀请链接；加入申请需要已有群成员确认。', code: '输入邀请码，等待群成员批准。' })[mode], 'muted');
   if (!items.length) return expand('暂无内容；Esc 返回，Ctrl+P 选择其他操作。', 'muted');
   const result = [];
   items.forEach((item, i) => {
-    const label = `${i === index ? '›' : ' '} ${mode === 'files' ? selected.includes(item.path) ? '[✓] ' : '[ ] ' : ''}${item.label}`;
+    const label = `${i === index ? '›' : ' '} ${mode === 'files' && item.path && !item.directory ? selected.includes(item.path) ? '[✓] ' : '[ ] ' : ''}${item.label}`;
     const parts = i === index ? wrapText(label, width) : [clipText(label, width)];
     for (const text of parts) result.push(row(text, i === index ? 'accent' : undefined, { selected: i === index, itemIndex: i }));
   });
   return result;
 }
-export function PickDropScreen({ width = 80, height = 24, snapshot = {}, group, mode = 'chat', input = '', items = [], index = 0, notice = '', busy = false, selected = [], offset = 0, target, qr = '' }) {
+export function PickDropScreen({ width = 80, height = 24, snapshot = {}, group, mode = 'chat', input = '', items = [], index = 0, notice = '', busy = false, selected = [], offset = 0, target, qr = '', cursor }) {
   const layout = getLayout(width, height), { columns, rows, bodyHeight, contentHeight } = layout;
   const current = typeof group === 'object' ? group : (snapshot.groups || []).find(g => g.id === (group || snapshot.selectedGroupId));
   const devices = snapshot.state?.devices || [], net = snapshot.network?.selected;
@@ -114,10 +116,15 @@ export function PickDropScreen({ width = 80, height = 24, snapshot = {}, group, 
   const routineNotice = notice.startsWith('后台已运行') || notice.startsWith('退出界面会停止');
   const statusParts = notice && !routineNotice ? [notice, ...alerts] : [...alerts, notice || snapshot.discoveryError || ''];
   const status = busy ? '处理中…' : statusParts.filter(Boolean).join('  ·  ') || `${current?.online === false ? '群主机离线' : '就绪'} · ${snapshot.device?.name || '本机'}`;
-  const editable = ['chat', 'create', 'join', 'code', 'destination', 'filepath'].includes(mode);
+  const editable = ['chat', 'create', 'join', 'code', 'destination', 'settings', 'filepath'].includes(mode);
   const filePrefix = `已选 ${selected.length} 个 · `;
-  const inputLabel = mode === 'files' ? filePrefix + clipText(input, columns - cells(filePrefix), true) : editable ? `› ${input || (mode === 'chat' ? '输入消息…' : '请输入…')} ▏` : '↑↓ 选择 · Enter 确认 · PgUp/PgDn 长内容 · Esc 返回';
-  const keys = mode === 'files' ? (columns < 75 ? '空格多选 Ctrl+S发送 Ctrl+L路径 Tab补全 Esc返回' : '↑↓ 选择  Enter 进入  空格多选  Ctrl+S 发送  Ctrl+L 路径  Tab 补全  Esc 返回') : columns < 75 ? 'Ctrl+P菜单 Ctrl+O文件 Ctrl+G群 Esc返回 Ctrl+C退出' : 'Ctrl+P 菜单  Ctrl+O 发文件  Ctrl+G 切群  PgUp/Dn 历史  Esc 返回  Ctrl+C 退出';
+  const inputParts = graphemes(input), inputCursor = Math.min(cursor ?? inputParts.length, inputParts.length);
+  let inputStart = inputCursor, available = Math.max(1, columns - 8);
+  while (inputStart > 0 && cells(inputParts[inputStart - 1]) <= available) { available -= cells(inputParts[--inputStart]); }
+  inputParts.splice(inputCursor, 0, '▏');
+  const visibleInput = clipText((inputStart ? '…' : '') + inputParts.slice(inputStart).join(''), Math.max(1, columns - 2));
+  const inputLabel = mode === 'files' ? filePrefix + clipText(input, columns - cells(filePrefix), true) : editable ? `› ${input ? visibleInput : '请输入… ▏'}` : '↑↓ 选择 · Enter 确认 · PgUp/PgDn 长内容 · Esc 返回';
+  const keys = mode === 'files' ? (columns < 75 ? '↑↓选择 Enter多选 列表末尾发送 ←返回' : '↑↓ 选择  → 目录  Enter/空格多选  列表末尾发送  ← 返回') : editable ? '←→ 光标  Enter 确认  Esc 返回  Ctrl+U 清空' : '↑↓ 选择  → 进入  Enter 确认  ← / Esc 返回';
   const brand = '拾传 · PickDrop', right = clipText(netLabel, Math.max(0, columns - cells(brand) - 3));
   return h(Box, { width: columns, height: rows, flexDirection: 'column', flexShrink: 0 },
     line(row(brand + ' '.repeat(Math.max(1, columns - cells(brand) - cells(right))) + right, 'accent', { bold: true }), columns, 'brand', theme.base),

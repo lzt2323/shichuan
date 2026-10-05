@@ -8,7 +8,8 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { chromium } from 'playwright';
 
-process.env.FORCE_COLOR = '3';
+process.env.FORCE_COLOR ||= '3';
+const captureOnly = process.argv.includes('--capture-only');
 const requireTui = createRequire(new URL('../apps/tui/package.json', import.meta.url));
 const { default: React } = await import(requireTui.resolve('react'));
 const { render } = await import(requireTui.resolve('ink'));
@@ -52,19 +53,19 @@ function indexed(n) {
   return `rgb(${level(Math.floor(c / 36))},${level(Math.floor(c / 6) % 6)},${level(c % 6)})`;
 }
 function terminalHtml(ansi) {
-  let fg = '#DCE8EA', bg = '#0B1318', bold = false, dim = false, html = '';
+  let fg = '#DCE8EA', bg = '#080c10', bold = false, dim = false, html = '';
   const segments = new Intl.Segmenter('zh', { granularity: 'grapheme' });
   for (const token of ansi.split(/(\x1b\[[0-9;]*m)/)) {
     if (token.startsWith('\x1b[')) {
       const codes = token.slice(2, -1).split(';').map(Number);
       for (let i = 0; i < codes.length; i++) {
         const c = codes[i];
-        if (c === 0) { fg = '#DCE8EA'; bg = '#0B1318'; bold = false; dim = false; }
+        if (c === 0) { fg = '#DCE8EA'; bg = '#080c10'; bold = false; dim = false; }
         else if (c === 1) bold = true;
         else if (c === 2) dim = true;
         else if (c === 22) { bold = false; dim = false; }
         else if (c === 39) fg = '#DCE8EA';
-        else if (c === 49) bg = '#0B1318';
+        else if (c === 49) bg = '#080c10';
         else if (c >= 30 && c <= 37) fg = basic[c - 30];
         else if (c >= 40 && c <= 47) bg = basic[c - 40];
         else if (c >= 90 && c <= 97) fg = basic[c - 90 + 8];
@@ -86,7 +87,7 @@ function terminalHtml(ansi) {
   }
   return html;
 }
-const browser = await chromium.launch({ headless: true });
+const browser = captureOnly ? null : await chromium.launch({ headless: true });
 const results = [];
 try {
   for (const [columns, rows, name] of [[160, 40, 'wide'], [120, 30, 'medium'], [80, 24, 'narrow'], [60, 18, 'compact']]) {
@@ -95,17 +96,17 @@ try {
     const lines = plain.replace(/\n$/, '').split('\n');
     assert.ok(lines.length <= rows, `${name} overflows terminal height`);
     assert.ok(lines.every(line => stringWidth(line) <= columns), `${name} overflows terminal width`);
-    assert.match(plain, /输入消息/); assert.match(plain, /Ctrl\+P/);
-    const html = `<!doctype html><meta charset="utf-8"><title>PickDrop ${columns}×${rows}</title><style>*{box-sizing:border-box}body{margin:0;padding:20px;background:#0B1318;color:#8CA2AA}header{font:13px monospace;margin-bottom:12px}pre{margin:0;font-family:Menlo,Consolas,"Hiragino Sans GB",monospace;font-size:14px;line-height:21px;white-space:pre}span{height:21px;vertical-align:top}</style><header>PickDrop · ${columns} × ${rows} · Ink 渲染输出 / 演示数据</header><pre>${terminalHtml(ansi)}</pre>`;
+    assert.match(plain, /↑↓ 选消息/); assert.match(plain, /Ctrl\+P/);
+    const html = `<!doctype html><meta charset="utf-8"><title>PickDrop ${columns}×${rows}</title><style>*{box-sizing:border-box}body{margin:0;padding:20px;background:#080c10;color:#8CA2AA}header{font:13px monospace;margin-bottom:12px}pre{margin:0;font-family:Menlo,Consolas,"Hiragino Sans GB",monospace;font-size:14px;line-height:21px;white-space:pre}span{height:21px;vertical-align:top}</style><header>PickDrop · ${columns} × ${rows} · Ink 渲染输出 / 演示数据</header><pre>${terminalHtml(ansi)}</pre>`;
     await writeFile(path.join(output, `${name}.ansi`), ansi);
     await writeFile(path.join(output, `${name}.txt`), plain);
     await writeFile(path.join(output, `${name}.html`), html);
-    const page = await browser.newPage({ viewport: { width: columns * 9 + 40, height: rows * 21 + 80 }, deviceScaleFactor: 1.5 });
-    await page.setContent(html); await page.screenshot({ path: path.join(output, `${name}.png`), fullPage: true }); await page.close();
-    results.push({ columns, rows, outputRows: lines.length, image: `${name}.png` });
+    if (browser) { const page = await browser.newPage({ viewport: { width: columns * 9 + 40, height: rows * 21 + 80 }, deviceScaleFactor: 1.5 });
+    await page.setContent(html); await page.screenshot({ path: path.join(output, `${name}.png`), fullPage: true }); await page.close(); }
+    results.push({ columns, rows, outputRows: lines.length, html: `${name}.html`, image: captureOnly ? null : `${name}.png` });
   }
   await writeFile(path.join(output, 'report.json'), JSON.stringify({ actualInkOutput: true, fixtureData: true, nativeLinuxTerminal: false, results }, null, 2));
-  console.log('TUI visual smoke passed: 160×40, 120×30, 80×24, 60×18. See artifacts/tui/.');
+  console.log(`TUI ${captureOnly ? 'ANSI/HTML capture' : 'visual smoke'} passed: 160×40, 120×30, 80×24, 60×18. See artifacts/tui/.`);
 } finally {
-  await browser.close(); app.unmount(); app.cleanup(); stdin.destroy(); stdout.destroy();
+  await browser?.close(); app.unmount(); app.cleanup(); stdin.destroy(); stdout.destroy();
 }
