@@ -1,5 +1,6 @@
 packages:
   - apps/mobile
+  - apps/tui
 allowBuilds:
   electron-winstaller: false
   electron: true

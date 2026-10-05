@@ -155,6 +155,15 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
       await Promise.allSettled(session.groups.map(group => client.api(group.id, '/api/join', { method: 'POST', body: device })));
       return { ...device };
     }); },
+    reconnectAt(id, baseUrl, options = {}) { return mutate(async () => {
+      const existing = client.getGroup(id);
+      const candidate = validateGroup({ ...existing, baseUrl: baseAddress(baseUrl).origin });
+      // Challenge/proof is checked before credentials are sent or an address is saved.
+      await authenticate(candidate, options.signal); checkAbort(options.signal);
+      const groups = session.groups.map(group => group.id === id ? candidate : group);
+      await persist({ ...session, groups });
+      return { ...candidate };
+    }); },
     requestJoinAt(baseUrl, code, options = {}) {
       if (!/^\d{6}$/.test(String(code).trim())) throw failure('请输入 6 位数字邀请码');
       return client.requestJoin(`${baseAddress(baseUrl).origin}/#invite=${String(code).trim()}`, options);

@@ -24,6 +24,7 @@ export type MobileClient = {
   setActiveGroup(id: string | null): Promise<void>;
   removeGroup(id: string): Promise<void>;
   rename(name: string): Promise<Device>;
+  reconnectAt(id: string, baseUrl: string, options?: Pick<RequestOptions, 'signal'>): Promise<Group>;
   requestJoinAt(baseUrl: string, code: string, options?: Pick<JoinOptions, 'signal'>): Promise<JoinTicket>;
   requestJoin(link: string, options?: Pick<JoinOptions, 'signal'>): Promise<JoinTicket>;
   checkJoin(ticket: JoinTicket, options?: Pick<JoinOptions, 'signal'>): Promise<{ status: JoinStatus; group?: Group }>;

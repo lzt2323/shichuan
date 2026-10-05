@@ -1,8 +1,10 @@
 {
   "name": "pickdrop",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "packageManager": "pnpm@11.19.0",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "private": true,
   "type": "module",
   "description": "拾传：聊天式局域网文件收件箱",
@@ -22,11 +24,14 @@
     "mobile:export": "pnpm --dir apps/mobile export:check",
     "desktop:prepare": "node scripts/prepare-desktop.js",
     "desktop:motion": "node scripts/desktop-motion-smoke.js",
-    "desktop:visual": "node scripts/desktop-visual-smoke.js"
+    "desktop:visual": "node scripts/desktop-visual-smoke.js",
+    "tui": "node apps/tui/cli.js",
+    "linux:package": "node scripts/package-linux.js"
   },
   "dependencies": {
     "qrcode": "1.5.4",
-    "ws": "8.18.3"
+    "ws": "8.18.3",
+    "bonjour-service": "1.4.4"
   },
   "devDependencies": {
     "electron": "44.5.1",

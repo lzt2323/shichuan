@@ -26,6 +26,11 @@ async function api(group, route, options = {}) {
 async function join(group, manual = false) {
   const invite = await manager.createInvite(group.id);
   await page.getByRole('button', { name: '加入传输群', exact: true }).click();
+  await page.getByText('附近的传输群', { exact: true }).waitFor();
+  await page.getByTestId('discovery-unavailable').waitFor();
+  await page.getByText('此环境不支持附近发现', { exact: true }).waitFor();
+  await page.screenshot({ path: 'artifacts/mobile-nearby-web.png' });
+  await page.getByRole('button', { name: '高级连接', exact: true }).click();
   if (manual) {
     await page.getByRole('tab', { name: '地址 + 邀请码', exact: true }).click();
     await page.getByLabel('电脑地址', { exact: true }).fill(group.baseUrl);
@@ -85,7 +90,7 @@ try {
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
   await poll(async () => (await api(first, '/api/state')).messages.some(message => message.text === '小屏幕发送成功'));
   assert.deepEqual(errors, []);
-  await writeFile('artifacts/mobile-ui-smoke.json', JSON.stringify({ runtime: 'React Native Web, not a physical device', pairing: ['invitation link', 'address and code'], realServer: true, groupIsolation: true, perGroupTextDraft: true, memberApproval: true, narrowScreen: '320x568', errors }, null, 2));
+  await writeFile('artifacts/mobile-ui-smoke.json', JSON.stringify({ runtime: 'React Native Web, not a physical device', pairing: ['invitation link', 'address and code'], discoveryWebFallback: true, realServer: true, groupIsolation: true, perGroupTextDraft: true, memberApproval: true, narrowScreen: '320x568', errors }, null, 2));
   console.log('Mobile UI smoke passed: actual App.tsx, real pairing/approval, two groups, drafts, text, narrow layout.');
 } finally {
   for (const peer of peers) peer.terminate();
