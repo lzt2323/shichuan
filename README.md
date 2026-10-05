@@ -117,6 +117,8 @@ Android 已配置单/多文件分享 Intent，iOS 已配置 App Group 和 Share 
 
 ## 已选视觉方案
 
+Linux TUI 采用 [A 青绿工作台](docs/ui-concepts/2026-10-05-tui/A-teal-workbench.png)：宽屏显示群、会话、设备与任务三栏，中等宽度双栏，窄屏聚焦会话，随终端尺寸即时切换。支持安装 `pickdrop open` / `pickdrop stop` 快捷命令，并记住上次下载目录。操作与安装方式见 [Linux 使用指南](docs/linux.md)。
+
 当前源码实施 [多人传输会话与小半球方案](docs/ui-concepts/2026-10-04/D-group-transfer-halfball.png)。顶部小半球位于系统菜单栏下方的可用工作区，左右半球避开顶部角落。透明窗口使用自定义右下角缩放。手机沿用蓝白多人会话，采用全屏群列表和聊天页面、底部待发区与系统分享。现有 `dist` 安装包不会随源码自动更新。
 
 `desktop:motion` 检查三边吸附、半球真实尺寸及透明像素、拖出和自定义缩放。`desktop:visual` 使用隔离测试数据与实际后端生成多人会话截图，并检查最小窗口与发送操作。这些测试使用受控屏幕指针，不代表已经完成 Windows 或混合 DPI 多屏物理鼠标实测。
