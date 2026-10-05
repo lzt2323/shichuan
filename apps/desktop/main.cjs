@@ -8,6 +8,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const { Readable, Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { createNetworkTransferScope } = require('./network-transfers.cjs');
+const { readClipboardImage } = require('./clipboard-image.cjs');
 const networkTransfers = createNetworkTransferScope();
 const { initialBounds, createWindowController } = require('./window-controller.cjs');
 
@@ -192,6 +193,7 @@ function registerIPC() {
     broadcast('groups:changed', publicGroups()); return bootstrap(record);
   });
   handle('app:copy', (_record, text) => { if (typeof text !== 'string' || text.length > 1e6) throw new Error('复制内容无效'); clipboard.writeText(text); return true; });
+  handle('app:clipboard-image', () => readClipboardImage(clipboard, nativeImage));
   handle('window:pin', (record, value) => record.control.setPinned(value));
   handle('window:dock', record => record.control.dock());
   handle('window:expand', record => record.control.expand(true));

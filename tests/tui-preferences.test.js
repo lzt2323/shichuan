@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import { loadPreferences } from '../apps/tui/preferences.js';
 import { createDaemon } from '../apps/tui/daemon.js';
 import { locations } from '../apps/tui/common.js';
+import { rpc } from '../apps/tui/rpc.js';
 
 const exec = promisify(execFile);
 const managerOptions = { discoveryFactory: async () => ({ list: () => [], refresh() {}, close() {} }), host: '127.0.0.1', monitorIntervalMs: 600000 };
@@ -22,6 +23,35 @@ test('cold preferences use Downloads and concurrent saves remain private and sur
   assert.equal((await fs.stat(config)).mode & 0o777, 0o700);
   assert.equal((await fs.stat(path.join(config, 'preferences.json'))).mode & 0o777, 0o600);
   assert.deepEqual(await fs.readdir(config), ['preferences.json']);
+});
+
+test('preferences RPC saves a directory before any download, rejects invalid selections, and survives restart', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pd-pref-'));
+  const paths = locations({ ...process.env, XDG_DATA_HOME: path.join(root, 'd'), XDG_STATE_HOME: path.join(root, 's'), XDG_CONFIG_HOME: path.join(root, 'c'), XDG_RUNTIME_DIR: path.join(root, 'r') });
+  let daemon = await createDaemon({ paths, managerOptions });
+  t.after(async () => { await daemon.close(); await fs.rm(root, { recursive: true, force: true }); });
+  const call = (method, params) => rpc(method, params, { paths });
+  const directory = path.join(root, '预设 保存目录');
+  assert.deepEqual(await call('preferences', { downloadDirectory: directory }), { downloadDirectory: directory });
+  assert.deepEqual(await fs.readdir(directory), [], 'write probe must not leave a file behind');
+  const snapshot = await call('snapshot');
+  assert.equal(snapshot.preferences.downloadDirectory, directory);
+  assert.deepEqual(snapshot.groups, []);
+  assert.deepEqual(snapshot.transfers, []);
+  const preferencesFile = path.join(paths.config, 'preferences.json');
+  const saved = await fs.readFile(preferencesFile, 'utf8');
+  const regularFile = path.join(root, 'ordinary-file');
+  await fs.writeFile(regularFile, 'not a directory');
+  for (const downloadDirectory of [undefined, null, 123, '', 'relative', regularFile, path.join(root, 'bad\0path')]) {
+    await assert.rejects(call('preferences', { downloadDirectory }));
+    assert.equal((await call('status')).preferences.downloadDirectory, directory);
+    assert.equal(await fs.readFile(preferencesFile, 'utf8'), saved);
+  }
+  assert.equal((await fs.stat(paths.socket)).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(preferencesFile)).mode & 0o777, 0o600);
+  await daemon.close();
+  daemon = await createDaemon({ paths, managerOptions });
+  assert.equal((await call('snapshot')).preferences.downloadDirectory, directory);
 });
 
 test('receive remembers accepted directory, rejects bad selections without changing it, and CLI defaults survive restart', async t => {

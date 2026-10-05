@@ -84,6 +84,11 @@ export async function createDaemon({ paths = locations(), managerOptions = {} } 
     if (closed) throw new Error('后台服务正在停止');
     switch (method) {
       case 'status': return { device: manager.device, groups: manager.listGroups().map(publicGroup), network: network(), transfers: transfers.list(), joins: [...joins.values()], preferences: preferences.snapshot(), discoveryError: lastError, pid: process.pid };
+      case 'preferences': {
+        const directory = await validateDownloadDirectory(p.downloadDirectory);
+        await preferences.remember(directory);
+        return preferences.snapshot();
+      }
       case 'snapshot': {
         const groups = manager.listGroups(), group = p.group ? groupBy(groups, p.group) : groups[0];
         return { ...await dispatch('status'), selectedGroupId: group?.id, state: group ? states.get(group.id) || { messages: [], devices: [] } : { messages: [], devices: [] }, requests: group ? requests.get(group.id) || [] : [] };

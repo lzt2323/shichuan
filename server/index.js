@@ -15,6 +15,7 @@ const publicDir = fileURLToPath(new URL('../apps/desktop/public/', import.meta.u
 const staticFiles = new Map([
   ['/', [path.join(publicDir, 'index.html'), 'text/html; charset=utf-8']],
   ['/app.js', [path.join(publicDir, 'app.js'), 'text/javascript; charset=utf-8']],
+  ['/clipboard-images.js', [path.join(publicDir, 'clipboard-images.js'), 'text/javascript; charset=utf-8']],
   ['/styles.css', [path.join(publicDir, 'styles.css'), 'text/css; charset=utf-8']],
   ['/protocol.js', [fileURLToPath(new URL('../shared/protocol.js', import.meta.url)), 'text/javascript; charset=utf-8']],
 ]);

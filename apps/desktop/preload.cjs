@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('pickdrop', {
   respondJoin: (id, allow) => ipcRenderer.invoke('group:respond', id, allow),
   rename: name => ipcRenderer.invoke('app:rename', name),
   copy: text => ipcRenderer.invoke('app:copy', text),
+  readClipboardImage: () => ipcRenderer.invoke('app:clipboard-image'),
   prepareFile: id => ipcRenderer.invoke('file:prepare', id),
   startDrag: id => ipcRenderer.send('file:drag', id),
   revealFile: id => ipcRenderer.invoke('file:reveal', id),
