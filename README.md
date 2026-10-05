@@ -10,6 +10,7 @@
 
 - Windows x64 免安装单文件：`PickDrop-0.2.1-Windows.exe`。
 - Mac Apple 芯片版：`PickDrop-0.2.1-Mac-AppleSilicon.zip`，解压后打开 `PickDrop.app`。
+- Android ARM64 内测包由 [Android APK 工作流](https://github.com/lzt2323/shichuan/actions/workflows/android.yml)生成，下载入口为 [Android Releases](https://github.com/lzt2323/shichuan/releases/tag/android-v0.2.1)。应用名称为「拾传内测」，无需 Expo Go 或开发服务器；使用公开测试证书和独立包名，正式版须另配私有签名。
 
 无需安装 Node.js。Mac 版本未签名、公证，系统可能拦截；Intel Mac 需另行构建。Windows 在 macOS 上交叉构建，尚未完成 Windows 实机启动、防火墙与物理拖放验证。
 
@@ -93,13 +94,13 @@ pnpm --dir apps/mobile ios
 pnpm --dir apps/mobile android
 ```
 
-iOS 原生构建需要完整 Xcode，真机安装需要签名；安卓需要 JDK 与 Android SDK。`mobile:export` 仅验证 JavaScript/Hermes bundle，不代表原生构建或真机验证。`apps/mobile/eas.json` 提供 EAS 内测构建配置（需要自行登录 EAS 并配置项目/签名），尚未交付此轮 APK/IPA。
+iOS 原生构建需要完整 Xcode，真机安装需要签名；安卓需要 JDK 与 Android SDK。`mobile:export` 仅验证 JavaScript/Hermes bundle，不代表原生构建或真机验证。Android 内测 APK 通过 GitHub Actions 编译，详见 CONTRIBUTING.md。`apps/mobile/eas.json` 也提供 EAS 构建配置（需要自行登录并配置项目/签名）。暂不提供 IPA。
 
 手机体验步骤：电脑运行 `pnpm start`，打开群菜单的「邀请设备加入」。手机运行客户端后选「扫描邀请二维码」，在电脑批准申请即可进入群；无法扫码时填写邀请页显示的电脑地址和六位码。两台设备须在同一可互通的网络，电脑保持运行。使用 SDK 57 兼容的 Expo Go 可以调试基础流程；完整系统分享入口需要自定义原生构建，Expo Go 不会注册本项目的分享扩展。
 
 `pnpm mobile:web` 提供同一份 React Native 界面的浏览器预览，连接凭据仅保留在页面内存。网页预览可测试群连接和文字消息；文件、相机权限和系统分享须在手机原生客户端验收。启动 `pnpm --dir apps/mobile exec expo start --web --port 8082` 后运行 `pnpm mobile:smoke`，验证真实后端配对、成员审批、两群隔离、草稿保留和 320px 小屏布局。结果截图在 `artifacts/mobile-*.png`，不应当作真机截图。
 
-Android 已配置单/多文件分享 Intent，iOS 已配置 App Group 和 Share Extension。iOS 的外部分享接收使用 [Expo Sharing 实验性入口](https://docs.expo.dev/versions/v57.0.0/sdk/sharing/)，其打开主 App 的实现需要逐版本真机验证；正式发布前仍需验证 iOS/Android 权限、键盘、文件提供商、大文件、锁屏和分享回流。当前开发机仅有 Xcode Command Line Tools，缺少完整 Xcode、JDK 与 Android SDK，因此本轮只完成原生工程生成与 JS 构建，没有执行原生编译或真机验收。
+Android 已配置单/多文件分享 Intent，iOS 已配置 App Group 和 Share Extension。iOS 的外部分享接收使用 [Expo Sharing 实验性入口](https://docs.expo.dev/versions/v57.0.0/sdk/sharing/)，其打开主 App 的实现需要逐版本真机验证；正式发布前仍需验证 iOS/Android 权限、键盘、文件提供商、大文件、锁屏和分享回流。Android 原生编译交由 GitHub 托管运行器完成；当前本机环境未安装完整原生工具链，尚未完成手机真机验收。
 
 ## 已选视觉方案
 
