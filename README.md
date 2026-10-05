@@ -1,22 +1,26 @@
 # 拾传 · PickDrop
 
+<img src="assets/brand/app-icon.png" width="96" height="96" alt="拾传 · 拾点 Logo">
+
 局域网文件群聊。把文件拖进小窗，群内设备共享文字与文件；电脑接收完成后，可把文件卡片拖到桌面或文件夹。项目采用 MIT 许可证。
 
 ## 下载与版本管理
 
 源码仓库：[lzt2323/shichuan](https://github.com/lzt2323/shichuan)。安装包统一从 [GitHub Releases](https://github.com/lzt2323/shichuan/releases) 下载；源码历史不包含安装包和用户数据。开发分支、检查和标签发布约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 0.3.1 全平台内测版
+## 0.3.2 全平台内测版
 
-所有安装包集中在 [v0.3.1 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.3.1)，按系统下载一项即可：
+新版采用 A「拾点」Logo，并包含青绿响应式 Linux TUI、快捷启停命令和记住上次保存目录。
+
+所有安装包集中在 [v0.3.2 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.3.2)，按系统下载一项即可：
 
 | 系统 | 文件 |
 | --- | --- |
-| Windows x64 | `PickDrop-0.3.1-Windows.exe` |
-| Mac Apple 芯片 | `PickDrop-0.3.1-Mac-AppleSilicon.zip` |
-| Android ARM64 | `PickDrop-0.3.1-Android-arm64-preview.apk` |
-| Linux x64 | `PickDrop-0.3.1-Linux-x64-TUI.tar.gz` |
-| Linux ARM64 | `PickDrop-0.3.1-Linux-arm64-TUI.tar.gz` |
+| Windows x64 | `PickDrop-0.3.2-Windows.exe` |
+| Mac Apple 芯片 | `PickDrop-0.3.2-Mac-AppleSilicon.zip` |
+| Android ARM64 | `PickDrop-0.3.2-Android-arm64-preview.apk` |
+| Linux x64 | `PickDrop-0.3.2-Linux-x64-TUI.tar.gz` |
+| Linux ARM64 | `PickDrop-0.3.2-Linux-arm64-TUI.tar.gz` |
 
 安装包自带运行资源，不需要 Node.js、Expo Go 或开发服务器。Linux 提供终端界面及命令行，可在 SSH 中使用；解压后运行包内 `pickdrop`，详细说明见 [Linux 使用指南](docs/linux.md)。暂不提供 Linux 图形窗口版、Intel Mac 包或 iOS IPA。
 

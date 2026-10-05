@@ -1,0 +1,26 @@
+拾传 / PickDrop Logo 概念调研 · 2026-10-05
+
+项目：局域网内群组文件与文字共享，桌面悬浮窗、移动应用、Linux TUI。
+现有图标：深绿圆角底与浅黄右上箭头；此次探索更贴近“拾起、接住、传递”的品牌符号。
+
+一手参考
+Dropbox: https://blog.dropbox.com/topics/company/simplify-your-brand
+从具象插画简化为实体几何，关注大小尺寸、彩色与黑白辨识。
+Linear: https://linear.app/brand
+独立图形与字标组合分别服务不同场景，强调单色及留白。
+Slack / Pentagram: https://www.pentagram.com/work/slack
+少量基础几何形构成连接含义，简化色彩与结构以增强跨尺寸稳定性。
+Mozilla: https://www.mozilla.org/en-US/foundation/annualreport/2024/article/a-rebrand-and-a-call-to-action-reclaim-the-internet/
+字母与自身品牌含义提炼为符号，黑白结构优先。
+LocalSend: https://localsend.org/ ; https://github.com/localsend/localsend
+同类跨平台局域网文件与消息传输产品，用于差异定位参考，不作为设计原则的来源。
+
+本项目设计判断
+A 拾点：不对称托举形与圆角方块，青绿，亲近轻快；优先推荐。
+B 接力折页：两片错位交接的文件块与宽负形接缝，暖橙，含义直接。
+C 邻里三瓣：三个模块围绕共同空间，蓝紫，强调群组共享。
+D 拾字小印：以拾字构造现代几何印记，朱砂与米白，强调中文个性。
+
+每个方向展示主符号、字标、应用图标与单色形式。使用内置 image_gen 生成，完整提示词见 prompts.json。
+这些是待用户选择的位图概念稿，未替换应用现有图标。图内小图为视觉示意，不等于真实16px/24px像素测试。
+选定后需统一几何比例、去除生成图的轻微纹理、制作SVG与平台图标，并实际验证小尺寸和黑白效果。

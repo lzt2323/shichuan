@@ -260,8 +260,10 @@ else app.whenReady().then(async () => {
     manager.events.on('network-error', error => console.warn('Network:', error.message));
     manager.events.on('discovery-error', error => console.warn('Discovery:', error.message));
     manager.events.on('requests-changed', () => broadcast('requests:changed', {}));
-    const trayIcon = nativeImage.createFromPath(path.join(__dirname, 'assets/icon.png')).resize({ width: 18, height: 18 });
-    tray = new Tray(trayIcon); tray.setToolTip('拾传 · 群聊文件投递');
+    const trayIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', process.platform === 'darwin' ? 'trayTemplate.png' : 'icon.png'));
+    if (process.platform === 'darwin') trayIcon.setTemplateImage(true);
+    const sizedTrayIcon = process.platform === 'darwin' ? trayIcon : trayIcon.resize({ width: 20, height: 20 });
+    tray = new Tray(sizedTrayIcon); tray.setToolTip('拾传 · 群聊文件投递');
     tray.on('click', () => { const group = manager.listGroups()[0]; if (group) openGroup(group.id).catch(showError); });
     updateTray();
     Menu.setApplicationMenu(Menu.buildFromTemplate([
