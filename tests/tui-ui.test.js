@@ -13,7 +13,21 @@ const requireTui = createRequire(new URL('../apps/tui/package.json', import.meta
 const { default: React } = await import(requireTui.resolve('react'));
 const { render } = await import(requireTui.resolve('ink'));
 const { default: stringWidth } = await import(requireTui.resolve('string-width'));
-const pause = () => new Promise(resolve => setTimeout(resolve, 30));
+// Ink rebinds useInput in a passive effect on every render. A fixed delay does
+// not guarantee that effect ran, especially when CI is sharing a busy CPU.
+// Flush both the real stream's readable event and React's commit/effect work
+// before delivering the next independent key (or inspecting a frame).
+const { act } = React;
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+const turn = () => new Promise(resolve => setImmediate(resolve));
+const settle = async operation => { await act(async () => { operation?.(); await turn(); }); };
+async function waitFor(predicate, description, diagnostic = () => '', timeout = 5000) {
+  const deadline = Date.now() + timeout;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, `Timed out waiting for ${description}\n${diagnostic()}`);
+    await settle();
+  }
+}
 const keys = { menu: '\x10', files: '\x0f', groups: '\x07', down: '\x1b[B', enter: '\r', escape: '\x1b' };
 
 function snapshot(group = 'a') {
@@ -73,18 +87,32 @@ async function mount(t, columns = 80, rows = 24, options = {}) {
     if (method === 'nearby') return [{ name: '附近测试群', baseUrl: 'http://192.168.1.9:50000', groupId: 'nearby-a' }];
     return [];
   };
-  const app = render(React.createElement(App, { persistent: true, request, initialSnapshot, refreshInterval: 60000, ...options.appProps }), {
-    stdout, stdin, stderr: stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
+  let app;
+  await settle(() => {
+    app = render(React.createElement(App, { persistent: true, request, initialSnapshot, refreshInterval: 60000, ...options.appProps }), {
+      stdout, stdin, stderr: stdout, debug: true, patchConsole: false, exitOnCtrlC: false,
+    });
   });
   let exited = false;
   void app.waitUntilExit().then(() => { exited = true; });
-  t.after(() => { app.unmount(); app.cleanup(); stdin.destroy(); stdout.destroy(); });
-  await pause();
+  t.after(async () => {
+    await settle(() => app.unmount());
+    app.cleanup(); stdin.destroy(); stdout.destroy();
+  });
+  const frame = () => frames.at(-1) || '';
+  const ready = () => exited || !frame().includes('处理中…');
+  await waitFor(() => frames.length > 0 && stdin.listenerCount('readable') > 0, 'Ink input subscription and initial frame', frame);
   return {
     calls, frames, exited: () => exited,
-    frame: () => frames.at(-1) || '',
-    async key(value) { stdin.write(value); await pause(); },
-    async resize(width, height) { stdout.columns = width; stdout.rows = height; stdout.emit('resize'); await pause(); },
+    frame, settle,
+    async key(value) {
+      await waitFor(ready, 'UI ready before key', frame);
+      await settle(() => stdin.write(value));
+      await waitFor(() => stdin.readableLength === 0 && ready(), 'key consumption and UI completion', frame);
+    },
+    async resize(width, height) {
+      await settle(() => { stdout.columns = width; stdout.rows = height; stdout.emit('resize'); });
+    },
   };
 }
 
@@ -97,8 +125,15 @@ function fits(frame, columns, rows) {
 
 async function action(ui, index) {
   await ui.key(keys.menu);
-  for (let i = 0; i < index; i++) await ui.key(keys.down);
+  assert.match(ui.frame().split('\n')[3], /操作菜单/, 'Ctrl+P must open the action menu');
+  const selection = () => ui.frame().split('\n').find(line => /│ › /.test(line));
+  for (let i = 0; i < index; i++) {
+    const previous = selection();
+    await ui.key(keys.down);
+    assert.notEqual(selection(), previous, `Down ${i + 1} must advance the selected action`);
+  }
   await ui.key(keys.enter);
+  assert.doesNotMatch(ui.frame().split('\n')[3], /操作菜单/, 'Enter must finish opening the selected action');
 }
 
 for (const [columns, rows] of [[160, 40], [120, 30], [80, 24], [60, 18], [140, 26], [139, 26], [100, 26], [99, 26], [160, 25]]) {
@@ -260,7 +295,7 @@ test('slow group refresh never shows or approves the previous group state under 
   await ui.key(keys.enter);
   assert.equal(ui.calls.filter(call => call.method === 'respond').length, 0);
   release(snapshot('b'));
-  await pause();
+  await ui.settle();
 });
 
 test('invitation QR retains every quiet row, uses black on white, and hides as a whole on short screens', async t => {
@@ -300,20 +335,23 @@ test('the 10000 UTF-16 input cap never cuts an emoji or combining grapheme', asy
 });
 
 test('confirmed daemon disappearance exits and notifies once; transient RPC errors keep the UI open', async t => {
-  let failure, stopped = 0;
+  let failure, stopped = 0, transientErrors = 0;
   const ui = await mount(t, 80, 24, {
     appProps: { refreshInterval: 15, onDaemonStopped: () => { stopped++; } },
     request: async method => {
-      if (method === 'snapshot' && failure) throw Object.assign(new Error('test connection error'), { code: failure });
+      if (method === 'snapshot' && failure) {
+        if (failure === 'ETIMEDOUT') transientErrors++;
+        throw Object.assign(new Error('test connection error'), { code: failure });
+      }
       return undefined;
     },
   });
   failure = 'ETIMEDOUT';
-  await new Promise(resolve => setTimeout(resolve, 50));
+  await waitFor(() => transientErrors > 0, 'a transient snapshot error');
   assert.equal(stopped, 0);
   assert.equal(ui.exited(), false);
   failure = 'ECONNREFUSED';
-  await new Promise(resolve => setTimeout(resolve, 50));
+  await waitFor(() => ui.exited(), 'daemon disappearance to exit the app', ui.frame);
   assert.equal(stopped, 1);
   assert.equal(ui.exited(), true);
 });
