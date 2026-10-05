@@ -1,7 +1,9 @@
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export function usableIPv4(value) {
   if (typeof value !== 'string' || !/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return false;
-  const octets = value.split('.').map(Number);
+  const parts = value.split('.');
+  if (parts.some(part => String(Number(part)) !== part)) return false;
+  const octets = parts.map(Number);
   return octets.every(part => part >= 0 && part <= 255) && octets[0] > 0 && octets[0] !== 127 && octets[0] < 224;
 }
 /** mDNS is an untrusted hint. Whitelist fields and never accept keys or invite codes. */
@@ -28,10 +30,15 @@ export function createDiscoveryController(adapter, { timeoutMs = 8000, sessionId
   const emit = patch => { snapshot = { ...snapshot, ...patch }; for (const listener of listeners) listener(snapshot); };
   const clear = () => { clearTimeout(timer); subscriptions.forEach(item => item.remove()); subscriptions = []; };
   const stop = () => { const id = active; active = null; clear(); if (id) Promise.resolve(adapter.stop(id)).catch(() => {}); };
+  const armEmptyTimer = () => {
+    clearTimeout(timer); const id = active;
+    timer = setTimeout(() => { if (active === id && id && !snapshot.devices.length && snapshot.status === 'scanning') emit({ status: 'empty', message: '还没找到附近的传输群。确认电脑已打开拾传，手机和电脑连接同一网络；访客 Wi-Fi 或热点隔离可能阻止发现。' }); }, timeoutMs);
+  };
   const publishDevices = () => {
     const unique = new Map(); for (const group of records.values()) unique.set(`${group.groupId}:${group.hostDeviceId}`, group);
     const devices = [...unique.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
     emit({ devices, status: devices.length ? 'ready' : 'scanning', message: '' });
+    if (devices.length) clearTimeout(timer); else armEmptyTimer();
   };
   return {
     getSnapshot: () => snapshot,
@@ -41,10 +48,10 @@ export function createDiscoveryController(adapter, { timeoutMs = 8000, sessionId
       if (!adapter) { emit({ status: 'unavailable', devices: [], message: '附近发现需要安装拾传手机客户端；浏览器和 Expo Go 可使用扫码或高级连接。' }); return; }
       const id = sessionId(); active = id; emit({ status: 'scanning', devices: [], message: '' });
       const listen = (event, callback) => subscriptions.push(adapter.addListener(event, value => { if (active === id && value.sessionId === id) callback(value); }));
-      listen('onService', value => { const group = normalizeService(value); if (group) { records.set(group.serviceId, group); publishDevices(); } });
+      listen('onService', value => { const group = normalizeService(value); if (group && (records.has(group.serviceId) || records.size < 100)) { records.set(group.serviceId, group); publishDevices(); } });
       listen('onLost', value => { records.delete(value.serviceId); publishDevices(); });
       listen('onState', value => { if (['error', 'permission-denied'].includes(value.state)) { emit({ status: value.state, message: value.message || '附近发现暂不可用，请重试' }); clearTimeout(timer); } });
-      timer = setTimeout(() => { if (active === id && !snapshot.devices.length && snapshot.status === 'scanning') emit({ status: 'empty', message: '还没找到附近的传输群。确认电脑已打开拾传，手机和电脑连接同一网络；访客 Wi-Fi 或热点隔离可能阻止发现。' }); }, timeoutMs);
+      armEmptyTimer();
       try { await adapter.start(id); }
       catch (error) { if (active === id && snapshot.status !== 'permission-denied') emit({ status: 'error', message: error?.message || '无法查找附近设备，请检查网络后重试' }); }
     },

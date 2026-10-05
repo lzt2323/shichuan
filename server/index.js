@@ -34,7 +34,7 @@ async function readJson(req) {
   try { return JSON.parse(body); } catch { throw fail(400, '请求格式不正确'); }
 }
 
-export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', maxFileBytes = 8 * 1024 ** 3, group, pairingOptions = {} } = {}) {
+export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', listen = true, maxFileBytes = 8 * 1024 ** 3, group, pairingOptions = {} } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
   const filesDir = path.join(dataDir, 'files');
   await fs.mkdir(filesDir, { recursive: true, mode: 0o700 });
@@ -55,7 +55,8 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', m
   const connections = new Map();
   let writeQueue = Promise.resolve();
   let closing = false;
-  const activeUploads = new Set();
+  const activeUploads = new Set(), activeDownloads = new Set();
+  let transfersPaused = false, activeTransferRequests = 0;
   const state = () => ({ messages, devices: [...devices.values()], maxFileBytes });
   const persist = () => {
     const snapshot = JSON.stringify({ messages, devices: [...devices.values()].map(d => ({ ...d, online: false })) });
@@ -115,6 +116,13 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', m
       }
       if (pairing && route.startsWith('/api/pair/status/') && req.method === 'GET') return json(res, 200, pairing.status(route.slice('/api/pair/status/'.length), req.headers['x-poll-token'], req.socket.remoteAddress));
       if (!validKey(req.headers['x-room-key'])) throw fail(401, '配对信息不正确，请重新连接');
+      if ((route === '/api/files' && req.method === 'POST') || (route.startsWith('/api/files/') && req.method === 'GET')) {
+        if (closing || transfersPaused) throw fail(503, '正在切换网络，请稍后重试');
+        activeTransferRequests++;
+        let released = false;
+        const release = () => { if (!released) { released = true; activeTransferRequests--; } };
+        res.once('finish', release); res.once('close', release);
+      }
       if (route === '/api/state' && req.method === 'GET') return json(res, 200, state());
       if (route === '/api/qr' && req.method === 'GET') {
         const link = url.searchParams.get('link');
@@ -142,7 +150,7 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', m
         broadcast(); return json(res, 201, message);
       }
       if (route === '/api/files' && req.method === 'POST') {
-        if (closing) throw fail(503, '收件箱正在关闭');
+        if (closing || transfersPaused) throw fail(503, '正在切换网络，请稍后重试');
         const device = deviceFor(req);
         const declaredLength = Number(req.headers['content-length']);
         if (Number.isFinite(declaredLength) && declaredLength > maxFileBytes) throw fail(413, '文件超过当前大小上限');
@@ -171,11 +179,13 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', m
         return;
       }
       if (route.startsWith('/api/files/') && req.method === 'GET') {
+        if (closing || transfersPaused) throw fail(503, '正在切换网络，请稍后重试');
         const record = fileFor(route.slice('/api/files/'.length));
         if (!record) throw fail(404, '找不到这个文件');
         const stat = await fs.stat(record.path).catch(() => { throw fail(404, '文件已从磁盘移除'); });
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': stat.size, 'Content-Disposition': `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(record.message.fileName)}`, 'X-Content-SHA256': record.message.sha256, 'Cache-Control': 'no-store' });
-        await pipeline(createReadStream(record.path), res); return;
+        const download = pipeline(createReadStream(record.path), res); activeDownloads.add(download);
+        try { await download; } finally { activeDownloads.delete(download); } return;
       }
       throw fail(404, '找不到这个页面');
     } catch (error) {
@@ -211,20 +221,43 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', m
     }
   }, 15000);
   heartbeat.unref();
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); });
-  const actualPort = server.address().port;
-  const addresses = Object.values(os.networkInterfaces()).flat().filter(x => x && x.family === 'IPv4' && !x.internal).map(x => `http://${x.address}:${actualPort}`);
+  if (listen) {
+    try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); }); }
+    catch (error) { clearInterval(heartbeat); wss.close(); throw error; }
+  }
+  const actualPort = server.address()?.port || null;
+  const bindAddress = host === '0.0.0.0' ? '127.0.0.1' : host;
+  const baseUrl = actualPort ? `http://${bindAddress}:${actualPort}` : null;
+  const addresses = !actualPort ? [] : host === '0.0.0.0' ? Object.values(os.networkInterfaces()).flat().filter(x => x && x.family === 'IPv4' && !x.internal && !x.address.startsWith('169.254.')).map(x => `http://${x.address}:${actualPort}`) : host.startsWith('127.') ? [] : [baseUrl];
   return {
-    port: actualPort, key, baseUrl: `http://127.0.0.1:${actualPort}`, addresses,
+    port: actualPort, key, baseUrl, addresses,
+    activeTransfers: () => Math.max(activeTransferRequests, activeUploads.size + activeDownloads.size),
+    pauseTransfers(value = true) { transfersPaused = Boolean(value); },
     pairingLinks: addresses.map(address => `${address}/#key=${key}`),
     fileFor, state, registerDevice, pairing,
-    async close() {
+    async close({ force = false } = {}) {
       closing = true; clearInterval(heartbeat);
       for (const client of wss.clients) client.terminate();
-      await new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); });
-      await Promise.allSettled([...activeUploads]);
+      if (server.listening) await new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); if (force) server.closeAllConnections(); });
+      await Promise.allSettled([...activeUploads, ...activeDownloads]);
       await writeQueue;
       wss.close();
     },
   };
+}
+
+
+// The desktop UI has its own loopback-only origin. Group services may go offline
+// or change interfaces without taking the network selector itself away.
+export async function createDesktopUiServer() {
+  const server = http.createServer(async (req, res) => {
+    try {
+      const record = staticFiles.get(new URL(req.url, 'http://localhost').pathname);
+      if (req.method !== 'GET' || !record) { res.writeHead(404); res.end(); return; }
+      res.writeHead(200, { 'Content-Type': record[1], 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; connect-src 'self' http: https: ws: wss:; img-src 'self' data: blob: http: https:; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'" });
+      await pipeline(createReadStream(record[0]), res);
+    } catch { if (!res.headersSent) res.writeHead(500); res.end(); }
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  return { baseUrl: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); }) };
 }

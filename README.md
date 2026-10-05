@@ -6,13 +6,21 @@
 
 源码仓库：[lzt2323/shichuan](https://github.com/lzt2323/shichuan)。安装包统一从 [GitHub Releases](https://github.com/lzt2323/shichuan/releases) 下载；源码历史不包含安装包和用户数据。开发分支、检查和标签发布约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 0.2.1 桌面内测版
+## 0.3.0 全平台内测版
 
-- Windows x64 免安装单文件：`PickDrop-0.2.1-Windows.exe`。
-- Mac Apple 芯片版：`PickDrop-0.2.1-Mac-AppleSilicon.zip`，解压后打开 `PickDrop.app`。
-- Android ARM64 内测包由 [Android APK 工作流](https://github.com/lzt2323/shichuan/actions/workflows/android.yml)生成，下载入口为 [Android Releases](https://github.com/lzt2323/shichuan/releases/tag/android-v0.2.1)。应用名称为「拾传内测」，无需 Expo Go 或开发服务器；使用公开测试证书和独立包名，正式版须另配私有签名。
+所有安装包集中在 [v0.3.0 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.3.0)，按系统下载一项即可：
 
-无需安装 Node.js。Mac 版本未签名、公证，系统可能拦截；Intel Mac 需另行构建。Windows 在 macOS 上交叉构建，尚未完成 Windows 实机启动、防火墙与物理拖放验证。
+| 系统 | 文件 |
+| --- | --- |
+| Windows x64 | `PickDrop-0.3.0-Windows.exe` |
+| Mac Apple 芯片 | `PickDrop-0.3.0-Mac-AppleSilicon.zip` |
+| Android ARM64 | `PickDrop-0.3.0-Android-arm64-preview.apk` |
+| Linux x64 | `PickDrop-0.3.0-Linux-x64-TUI.tar.gz` |
+| Linux ARM64 | `PickDrop-0.3.0-Linux-arm64-TUI.tar.gz` |
+
+安装包自带运行资源，不需要 Node.js、Expo Go 或开发服务器。Linux 提供终端界面及命令行，可在 SSH 中使用；解压后运行包内 `pickdrop`，详细说明见 [Linux 使用指南](docs/linux.md)。暂不提供 Linux 图形窗口版、Intel Mac 包或 iOS IPA。
+
+Mac 未签名、公证；Android 为使用公开测试证书的「拾传内测」，采用独立包名 `app.pickdrop.mobile.preview`，正式版须另配私有签名。所有文件附统一 SHA256SUMS.txt。自动化构建不替代手机真机与各平台实际网络验证。
 
 ### 使用方法
 
@@ -39,15 +47,15 @@
 
 ## 当前边界
 
-当前是可信局域网原型，通过 HTTP/WebSocket 传输，**尚无 TLS 或端到端加密**，不应开放公网。局域网发现使用 UDP 组播 `239.255.47.32:47320`，各群服务使用动态 TCP 端口；防火墙需允许当前专用网络访问。发现后的地址会经过身份挑战校验。
+当前是可信局域网原型，通过 HTTP/WebSocket 传输，**尚无 TLS 或端到端加密**，不应开放公网。局域网发现使用 DNS-SD/mDNS `_pickdrop._tcp`，并兼容原桌面 UDP 组播 `239.255.47.32:47320`；各群服务使用动态 TCP 端口。传输网络可选择具体已连接网卡，邀请地址使用该接口的可达 IPv4，防火墙需允许当前专用网络访问。已配对设备的候选新地址经过身份挑战校验后才能接收凭据。
 
 尚未实现：公网中继、可靠离线投递、托管设备故障切换、成员撤销与密钥轮换、文件夹发送、断点续传、已读回执。物理多屏热拔插及真实系统鼠标拖放仍需实机验证。
 
-`apps/mobile` 已接入新版多人传输群，采用蓝白会话界面。支持多群切换、扫码或「地址 + 6 位码」申请加入、成员审批、手机身份及群凭据安全保存、旧单收件箱迁移、前后台重连、分群文字草稿与文件待发区。手机通过系统分享保存/打开收到的文件，不使用桌面悬浮球。
+`apps/mobile` 已接入新版多人传输群，采用蓝白会话界面。支持多群切换、附近发现、扫码或高级手动地址申请加入、成员审批、手机身份及群凭据安全保存、旧单收件箱迁移、前后台重连、分群文字草稿与文件待发区。手机通过系统分享保存/打开收到的文件，不使用桌面悬浮球。
 
 文件选择和外部分享先暂存为草稿，用户确认发送；传输锁定目标群，提供真实字节进度、取消和重试。收到的文件按群隔离缓存，校验大小和 SHA-256 后才能分享。暂存文件成功发送后清理；未发送文件可在重启后恢复。后台长时间传输、断点续传不作保证；失败时可回到前台重试。服务端尚无幂等上传，若提交成功但回包丢失，重试前应检查群记录，避免重复发送。
 
-手机目前不使用 UDP 自动发现；电脑地址变化后，重新扫描该群的新邀请并审批可更新连接。已保存的地址在发送凭据前进行 HMAC 主机校验。群由电脑托管，手机不能单独创建或托管群。
+手机原生客户端使用 Android NSD / iOS Bonjour 发现附近群；网页和 Expo Go 不包含此原生模块，会显示限制并保留手动加入。已保存的群地址在发送凭据前进行 HMAC 主机校验。群由电脑或 Linux 主机托管，手机不能单独创建或托管群。
 
 ## 运行与验证
 
@@ -78,6 +86,8 @@ PICKDROP_TEST_EXECUTABLE="$PWD/dist/mac-arm64/PickDrop.app/Contents/MacOS/PickDr
 ```sh
 pnpm desktop:package
 pnpm desktop:package:windows
+pnpm linux:package --arch=x64
+pnpm linux:package --arch=arm64
 ```
 
 Mac 命令同时生成应用与 ZIP；Windows 输出可单独分发的 EXE。构建先生成 `.build/desktop` 生产依赖目录，再封装 Electron。两个构建命令应依次执行。正式发布需要签名和 macOS 公证。
@@ -96,7 +106,7 @@ pnpm --dir apps/mobile android
 
 iOS 原生构建需要完整 Xcode，真机安装需要签名；安卓需要 JDK 与 Android SDK。`mobile:export` 仅验证 JavaScript/Hermes bundle，不代表原生构建或真机验证。Android 内测 APK 通过 GitHub Actions 编译，详见 CONTRIBUTING.md。`apps/mobile/eas.json` 也提供 EAS 构建配置（需要自行登录并配置项目/签名）。暂不提供 IPA。
 
-手机体验步骤：电脑运行 `pnpm start`，打开群菜单的「邀请设备加入」。手机运行客户端后选「扫描邀请二维码」，在电脑批准申请即可进入群；无法扫码时填写邀请页显示的电脑地址和六位码。两台设备须在同一可互通的网络，电脑保持运行。使用 SDK 57 兼容的 Expo Go 可以调试基础流程；完整系统分享入口需要自定义原生构建，Expo Go 不会注册本项目的分享扩展。
+手机体验步骤：电脑运行 `pnpm start`，打开群菜单的「邀请设备加入」。手机运行客户端后查看「附近」列表，选择目标群并输入电脑显示的六位码，电脑批准后加入；也可扫描邀请二维码，手动地址放在高级入口。两台设备须在同一可互通的网络，电脑保持运行。使用 SDK 57 兼容的 Expo Go 可以调试基础流程；附近发现与完整系统分享入口需要自定义原生构建，Expo Go 不会注册本项目的原生发现模块和分享扩展。
 
 `pnpm mobile:web` 提供同一份 React Native 界面的浏览器预览，连接凭据仅保留在页面内存。网页预览可测试群连接和文字消息；文件、相机权限和系统分享须在手机原生客户端验收。启动 `pnpm --dir apps/mobile exec expo start --web --port 8082` 后运行 `pnpm mobile:smoke`，验证真实后端配对、成员审批、两群隔离、草稿保留和 320px 小屏布局。结果截图在 `artifacts/mobile-*.png`，不应当作真机截图。
 

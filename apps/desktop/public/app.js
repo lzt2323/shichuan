@@ -225,8 +225,14 @@ function upload(file) {
   });
 }
 async function sendFiles(files) {
-  if (!config) return; uploading++; busy();
-  try { for (const file of files) await upload(file); } catch (error) { showError(error); } finally { uploading--; busy(); }
+  if (!config || !files.length) return;
+  let leased = false, counted = false;
+  try {
+    if (bridge?.setTransferBusy) { await bridge.setTransferBusy(true); leased = true; }
+    uploading++; counted = true; busy();
+    for (const file of files) await upload(file);
+  } catch (error) { showError(error); }
+  finally { if (counted) uploading--; if (leased) await bridge.setTransferBusy(false).catch(() => {}); busy(); }
 }
 function closeMenu() { $('group-menu').hidden = true; $('group-menu-button').setAttribute('aria-expanded', 'false'); busy(); }
 async function refreshGroups() {
@@ -278,10 +284,18 @@ function openJoin() {
     if (!/^\d{6}$/.test(code.value)) { toast('请输入 6 位数字邀请码'); code.focus(); return; }
     submit.disabled = true;
     try {
-      const ticket = await bridge.joinGroup(code.value); openPending(ticket);
+      const ticket = address.value.trim() && bridge.joinAt ? await bridge.joinAt(address.value.trim(), code.value, nearby.selectedOptions[0]?.dataset.groupId) : await bridge.joinGroup(code.value); openPending(ticket);
     } finally { submit.disabled = false; }
   }, 'primary-button', 'confirm-join-group');
-  body.append(description('输入另一台设备生成的 6 位邀请码。对方允许后，新群会在独立窗口打开。'), code, submit); code.onkeydown = event => { if (event.key === 'Enter' && !event.isComposing) submit.click(); }; code.focus();
+  const address = input('可选：对方电脑地址 http://192.168.…', 'join-address'); address.type = 'url';
+  const nearby = element('select', 'panel-input'); nearby.id = 'nearby-groups'; nearby.setAttribute('aria-label', '同网络附近的群');
+  const populate = async () => {
+    const list = await bridge.listNearby?.() || []; nearby.replaceChildren();
+    const fallback = element('option', '', list.length ? '自动搜索，或选择附近的群' : '暂无附近群，可填写电脑地址'); fallback.value = ''; nearby.append(fallback);
+    for (const item of list) { const option = element('option', '', `${item.name || '附近的群'} · ${item.baseUrl}`); option.value = item.baseUrl; option.dataset.groupId = item.groupId; nearby.append(option); }
+  };
+  nearby.onchange = () => { address.value = nearby.value; }; address.oninput = () => { nearby.value = ''; };
+  body.append(description('输入 6 位邀请码。仅在所选网络寻找对方，也可选择附近群或填写电脑地址。'), code, nearby, address, submit, action('刷新附近的群', populate, 'secondary-button')); populate().catch(() => {}); code.onkeydown = event => { if (event.key === 'Enter' && !event.isComposing) submit.click(); }; code.focus();
 }
 function openPending(ticket) {
   pendingTicket = ticket; clearTimeout(pendingTimer);
@@ -299,6 +313,45 @@ function openPending(ticket) {
   }; poll();
 }
 
+let networkPanelEpoch = 0;
+const networkType = type => ({ wifi: 'Wi-Fi', ethernet: '有线网络', vpn: 'VPN', virtual: '虚拟网卡', unknown: '网络' }[type] || '网络');
+function networkState(next) {
+  if (!config) return; config.network = next;
+  $('network-offline').hidden = !bridge || Boolean(next?.available);
+  $('network-offline').textContent = next?.switching ? '正在切换网络…' : '所选网络已断开 · 选择网络';
+}
+async function openNetwork() {
+  if (!bridge?.getNetwork) return;
+  const generation = ++networkPanelEpoch, body = openPanel('网络连接', 'network'); body.append(description('正在读取已连接的网卡…'));
+  const next = await bridge.getNetwork();
+  if (panelKind !== 'network' || generation !== networkPanelEpoch) return;
+  networkState(next); body.replaceChildren();
+  body.append(description('群监听、附近设备发现与传输共用此网络。网络断开后会等待原连接，不会自动换到其他网卡。'));
+  const selected = next.selected;
+  const current = element('div', 'network-current');
+  current.append(element('strong', '', selected ? `${networkType(selected.type)} · ${selected.name}` : '尚未选择网络'), element('span', '', selected ? `${selected.address} · ${next.available ? '已连接' : '已断开'}` : '请连接 Wi-Fi 或有线网络'));
+  body.append(current);
+  const form = element('div', 'network-options');
+  const row = (value, label, detail, checked) => {
+    const line = element('label', 'network-option'), radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'pickdrop-network'; radio.value = value; radio.checked = checked;
+    const words = element('span'); words.append(element('strong', '', label), element('small', '', detail)); line.append(radio, words); return line;
+  };
+  form.append(row('auto', '自动选择', '优先已连接的 Wi-Fi / 有线网络；点应用可重新选择', next.selection.mode === 'auto'));
+  const physical = next.interfaces.filter(item => !item.virtual), virtual = next.interfaces.filter(item => item.virtual);
+  const choice = item => row(item.id, `${networkType(item.type)} · ${item.name}`, `${item.address}${item.description ? ` · ${item.description}` : ''}`, next.selection.mode === 'manual' && selected?.id === item.id);
+  physical.forEach(item => form.append(choice(item)));
+  if (virtual.length) { const details = element('details', 'network-virtual'), summary = element('summary', '', `VPN / 虚拟网络（${virtual.length}）`); details.append(summary); virtual.forEach(item => details.append(choice(item))); if (selected?.virtual && next.selection.mode === 'manual') details.open = true; form.append(details); }
+  body.append(form);
+  const apply = action('应用所选网络', async () => {
+    const selectedRadio = form.querySelector('input:checked'); if (!selectedRadio) return;
+    if (uploading || next.transferBusy) { toast('有文件正在传输，请完成或取消后再切换'); return; }
+    apply.disabled = true;
+    try { const result = await bridge.setNetwork(selectedRadio.value === 'auto' ? { mode: 'auto' } : { mode: 'manual', id: selectedRadio.value }); networkState(result); toast(result.available ? `已使用 ${result.selected.name} · ${result.selected.address}` : '暂无可用网络'); if (panelKind === 'network') await openNetwork(); }
+    finally { apply.disabled = false; }
+  }, 'primary-button', 'apply-network');
+  body.append(apply, action('刷新网络列表', openNetwork, 'secondary-button'), description('切换网络会重新连接群。文件正在传输时不能切换；请先完成或取消。'));
+}
+
 function openMembers() {
   const body = openPanel(`${groupName()} · 设备`, 'members'); body.append(description('离线设备仍保留在本群，重新上线后继续同步。'));
   const devices = element('div'); devices.id = 'devices'; body.append(devices);
@@ -309,7 +362,7 @@ function openMembers() {
     if (bridge) { const result = await bridge.rename(name.value.trim()); config.device = result.device || { ...config.device, name: name.value.trim() }; }
     else { config.device.name = name.value.trim(); localStorage.setItem('pickdrop-device', JSON.stringify(config.device)); }
     await api('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config.device) }); toast('设备名称已保存');
-  }, 'secondary-button', 'rename-device')); body.append(settings); renderDevices();
+  }, 'secondary-button', 'rename-device')); body.append(settings); if (bridge?.getNetwork) body.append(action('网络连接设置', openNetwork, 'secondary-button')); renderDevices();
 }
 async function refreshRequests() {
   if (!bridge?.listJoinRequests || requestsLoading) return;
@@ -340,13 +393,15 @@ async function boot() {
     if (!device) { device = { id: crypto.randomUUID(), name: '浏览器设备', kind: 'web' }; localStorage.setItem('pickdrop-device', JSON.stringify(device)); }
     config = { device, room: { ...room, local: false, name: '我的文件' }, window: {} };
   }
-  document.body.dataset.platform = config.platform || 'web'; windowState(config.window || {});
+  document.body.dataset.platform = config.platform || 'web'; windowState(config.window || {}); networkState(config.network);
+  bridge?.onNetworkChanged?.(next => { networkState(next); if (panelKind === 'network') openNetwork().catch(showError); });
   bridge?.onGroupsChanged?.(() => groupsChanged().catch(showError)); bridge?.onJoinRequestsChanged?.(() => refreshRequests().catch(showError)); bridge?.onWindowChanged?.(windowState);
   await refreshGroups(); try { await join(); await refreshRequests(); } catch (error) { showError(error); connection(false); }
   // Remote group requests arrive over HTTP; native change events only cover local hosts.
   setInterval(() => { if (document.visibilityState === 'visible' && !config.window?.collapsed) refreshRequests().catch(() => {}); }, 2500);
 }
 $('group-menu-button').onclick = async () => { if (!config) return; if (!$('group-menu').hidden) { closeMenu(); return; } $('group-menu').hidden = false; $('group-menu-button').setAttribute('aria-expanded', 'true'); busy(); try { await refreshGroups(); } catch (error) { showError(error); } };
+$('network-settings').onclick = () => openNetwork().catch(showError); $('network-offline').onclick = () => openNetwork().catch(showError);
 $('create-group').onclick = openCreate; $('join-group').onclick = openJoin; $('invite-members').onclick = () => openInvite().catch(showError); $('view-members').onclick = openMembers; $('members-button').onclick = () => { if (config) openMembers(); };
 $('close-panel').onclick = () => $('panel').close(); $('panel').addEventListener('close', () => { panelKind = ''; clearInterval(inviteTimer); busy(); });
 $('panel').addEventListener('click', event => { if (event.target === $('panel')) { const rect = $('panel').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('panel').close(); } });

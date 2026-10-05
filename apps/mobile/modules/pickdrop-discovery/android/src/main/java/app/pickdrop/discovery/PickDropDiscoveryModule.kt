@@ -135,7 +135,7 @@ class PickDropDiscoveryModule : Module() {
               val hosts = if (Build.VERSION.SDK_INT >= 34) info.hostAddresses else listOfNotNull(info.host)
               val ipv4 = hosts.filterIsInstance<Inet4Address>().mapNotNull { it.hostAddress }.distinct()
               if (ipv4.isNotEmpty() && info.port in 1..65535) {
-                val txt = info.attributes.mapValues { (_, value) -> String(value, Charsets.UTF_8) }
+                val txt = info.attributes.mapValues { (_, value) -> value?.let { String(it, Charsets.UTF_8) } ?: "" }
                 resolved.add(serviceKey)
                 sendEvent("onService", mapOf("sessionId" to id, "serviceId" to serviceKey, "addresses" to ipv4, "port" to info.port, "txt" to txt))
               }

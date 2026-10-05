@@ -2,12 +2,6 @@ name: Android APK
 on:
   workflow_call:
   workflow_dispatch:
-  push:
-    branches: [main, "codex/**"]
-    paths:
-      - "apps/mobile/**"
-      - "pnpm-lock.yaml"
-      - ".github/workflows/android.yml"
 permissions:
   contents: read
 concurrency:

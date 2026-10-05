@@ -1,6 +1,7 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, clipboard, Menu, Tray } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, clipboard, Menu, Tray, session } = require('electron');
 const path = require('node:path');
 const os = require('node:os');
+const http = require('node:http'), https = require('node:https');
 const fs = require('node:fs/promises');
 const { createWriteStream, createReadStream } = require('node:fs');
 const { randomUUID, createHash } = require('node:crypto');
@@ -8,7 +9,7 @@ const { Readable, Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { initialBounds, createWindowController } = require('./window-controller.cjs');
 
-let manager, config, configPath, tray, uiOrigin, quitting = false, saveQueue = Promise.resolve();
+let manager, config, configPath, tray, uiOrigin, uiServer, networkProxy, quitting = false, saveQueue = Promise.resolve();
 const windows = new Map(), opening = new Map(), prepared = new Map(), pending = new Map();
 const dragIcon = nativeImage.createFromPath(path.join(__dirname, 'assets/drag-icon.png'));
 function saveConfig() {
@@ -41,18 +42,19 @@ function publicGroup({ key, ...group }) { return group; }
 function publicGroups() { return manager.listGroups().map(publicGroup); }
 function bootstrap(record) {
   const group = groupFor(record);
-  return { device: config.device, group, room: group, groups: publicGroups(), native: true, platform: process.platform, window: record.control.state() };
+  return { device: config.device, group, room: group, groups: publicGroups(), native: true, platform: process.platform, window: record.control.state(), network: manager.getNetwork() };
 }
 function cacheKey(group, id) { return `${group.id}|${group.key}|${id}`; }
 async function prepareFile(record, id) {
   if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)) throw new Error('文件编号不正确');
-  const group = groupFor(record), key = cacheKey(group, id);
+  let group = groupFor(record); const key = cacheKey(group, id);
   const requestHeaders = { 'X-Room-Key': group.key, 'X-Device-Id': config.device.id };
   if (prepared.has(key)) {
     try { await fs.access(prepared.get(key)); return prepared.get(key); }
     catch (error) { if (error.code !== 'ENOENT') throw error; prepared.delete(key); }
   }
   if (pending.has(key)) return pending.get(key);
+  let release;
   const operation = (async () => {
     const hosted = manager.getHostedInbox(group.id);
     if (hosted) {
@@ -60,9 +62,10 @@ async function prepareFile(record, id) {
       if (!local) throw new Error('文件不存在');
       await fs.access(local.path); prepared.set(key, local.path); return local.path;
     }
-    const response = await fetch(`${group.baseUrl}/api/state`, { headers: requestHeaders, signal: AbortSignal.timeout(10000) });
-    if (!response.ok) throw new Error('无法读取群消息');
-    const state = await response.json(), message = state.messages.find(item => item.id === id && item.type === 'file');
+    release = manager.acquireTransfer();
+    group = await manager.resolveGroup(group.id);
+    if (!group.online) throw new Error('群主机离线，请检查所选网络');
+    const state = await manager.authenticated(group.id, '/api/state'), message = state.messages.find(item => item.id === id && item.type === 'file');
     if (!message) throw new Error('找不到这个文件');
     if (!/^[a-f0-9]{64}$/i.test(message.sha256)) throw new Error('文件校验信息不正确');
     const { safeFileName } = await import('../../shared/protocol.js');
@@ -78,17 +81,21 @@ async function prepareFile(record, id) {
         if (hash.digest('hex') === message.sha256) { prepared.set(key, output); return output; }
       }
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const download = await fetch(`${group.baseUrl}/api/files/${id}`, { headers: requestHeaders, signal: AbortSignal.timeout(60 * 60 * 1000) });
-    if (!download.ok) throw new Error('文件接收失败');
+    const download = await new Promise((resolve, reject) => {
+      const target = new URL(`${group.baseUrl}/api/files/${id}`), transport = target.protocol === 'https:' ? https : http;
+      const request = transport.get(target, { headers: requestHeaders, localAddress: manager.getNetwork().selected.address, timeout: 60 * 60 * 1000 }, resolve);
+      request.on('timeout', () => request.destroy(new Error('文件接收超时'))); request.on('error', reject);
+    });
+    if (download.statusCode !== 200) { download.destroy(); throw new Error('文件接收失败'); }
     const hash = createHash('sha256');
     let bytes = 0;
     const meter = new Transform({ transform(chunk, enc, callback) { bytes += chunk.length; hash.update(chunk); callback(null, chunk); } });
     try {
-      await pipeline(Readable.fromWeb(download.body), meter, createWriteStream(partial, { mode: 0o600 }));
+      await pipeline(download, meter, createWriteStream(partial, { mode: 0o600 }));
       if (hash.digest('hex') !== message.sha256 || bytes !== message.size) throw new Error('文件完整性校验失败，请重新接收');
       await fs.rename(partial, output); prepared.set(key, output); return output;
     } catch (error) { await fs.rm(partial, { force: true }); throw error; }
-  })();
+  })().finally(() => release?.());
   pending.set(key, operation);
   try { return await operation; } finally { pending.delete(key); }
 }
@@ -121,20 +128,21 @@ async function openGroup(groupId) {
       title: `${group.name} · 拾传`, icon: path.join(__dirname, 'assets/icon.png'), frame: false, roundedCorners: false,
       transparent: true, backgroundColor: '#00000000', hasShadow: false, fullscreenable: false, resizable: false,
       autoHideMenuBar: true, alwaysOnTop: true, show: false,
-      webPreferences: { preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true },
+      webPreferences: { partition: 'persist:pickdrop-groups', preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true },
     });
     const control = createWindowController(win, saved, value => {
       config.windows[groupId] = value;
       saveConfig().catch(error => console.error('Save window preferences:', error.message));
     });
-    const record = { win, groupId, control }; windows.set(groupId, record);
+    const record = { win, groupId, control, transferReleases: [] }; windows.set(groupId, record);
     win.setAlwaysOnTop(true, 'floating');
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     const guardNavigation = (event, url) => { try { if (new URL(url).origin !== uiOrigin) event.preventDefault(); } catch { event.preventDefault(); } };
     win.webContents.on('will-navigate', guardNavigation); win.webContents.on('will-redirect', guardNavigation);
     win.webContents.on('did-finish-load', () => control.emit());
     win.on('close', event => { if (!quitting) { event.preventDefault(); win.hide(); } });
-    win.on('closed', () => windows.delete(groupId));
+    win.on('closed', () => { record.transferReleases.forEach(release => release()); windows.delete(groupId); });
+    win.webContents.on('render-process-gone', () => { record.transferReleases.splice(0).forEach(release => release()); });
     try { await win.loadURL(uiOrigin); }
     catch (error) { win.destroy(); throw error; }
     win.show(); control.restore(); control.emit(); updateTray();
@@ -149,6 +157,18 @@ function registerIPC() {
   handle('group:create', async (_record, name) => { const group = await manager.createGroup(name); await openGroup(group.id); return publicGroup(group); });
   handle('group:open', (_record, id) => openGroup(id));
   handle('group:join', (_record, code) => manager.joinWithCode(code));
+  handle('group:join-at', (_record, address, code, groupId) => manager.joinAt(address, code, groupId));
+  handle('group:nearby', () => manager.listNearby());
+  handle('network:get', async () => { await manager.refreshNetwork(); return manager.getNetwork(); });
+  handle('network:set', async (_record, value) => {
+    if (pending.size) throw new Error('有文件正在接收，请完成后再切换网络');
+    return manager.setNetwork(value);
+  });
+  handle('transfer:busy', (record, value) => {
+    if (value) record.transferReleases.push(manager.acquireTransfer());
+    else record.transferReleases.pop()?.();
+    return true;
+  });
   handle('group:check', async (_record, ticket) => {
     const result = await manager.checkJoin(ticket);
     if (result.status === 'approved' && result.group) await openGroup(result.group.id);
@@ -156,11 +176,9 @@ function registerIPC() {
   });
   handle('group:invite', async record => {
     const invite = await manager.createInvite(record.groupId);
-    const group = groupFor(record);
-    const link = new URL(group.baseUrl);
-    link.hash = new URLSearchParams({ invite: invite.code, group: group.id }).toString();
-    const qrDataUrl = await require('qrcode').toDataURL(link.href, { width: 224, margin: 2, errorCorrectionLevel: 'M' });
-    return { ...invite, link: link.href, baseUrl: group.baseUrl, qrDataUrl };
+    if (!invite.link || !invite.baseUrl) throw new Error('当前没有可分享地址，请在网络设置选择已连接的网卡');
+    const qrDataUrl = await require('qrcode').toDataURL(invite.link, { width: 224, margin: 2, errorCorrectionLevel: 'M' });
+    return { ...invite, qrDataUrl };
   });
   handle('group:requests', record => manager.listJoinRequests(record.groupId));
   handle('group:respond', (record, id, allow) => { if (typeof allow !== 'boolean') throw new Error('无效的审核操作'); return manager.respondJoin(record.groupId, id, allow); });
@@ -227,9 +245,16 @@ else app.whenReady().then(async () => {
     config.device = manager.device; await saveConfig();
     let groups = manager.listGroups();
     if (!groups.some(group => group.local)) { await manager.createGroup('我的设备'); groups = manager.listGroups(); }
-    uiOrigin = manager.getHostedInbox(groups.find(group => group.local).id).baseUrl;
+    const { createDesktopUiServer } = await import('../../server/index.js');
+    const { createDesktopNetworkProxy } = await import('../../server/desktop-proxy.js');
+    uiServer = await createDesktopUiServer(); uiOrigin = uiServer.baseUrl;
+    networkProxy = await createDesktopNetworkProxy(manager);
+    await session.fromPartition('persist:pickdrop-groups').setProxy({ proxyRules: networkProxy.address, proxyBypassRules: '127.0.0.1;localhost' });
     registerIPC();
     manager.events.on('groups-changed', () => { broadcast('groups:changed', publicGroups()); updateTray(); });
+    manager.events.on('network-changed', value => { if (value.switching || !value.available) networkProxy.disconnect(); broadcast('network:changed', value); });
+    manager.events.on('network-error', error => console.warn('Network:', error.message));
+    manager.events.on('discovery-error', error => console.warn('Discovery:', error.message));
     manager.events.on('requests-changed', () => broadcast('requests:changed', {}));
     const trayIcon = nativeImage.createFromPath(path.join(__dirname, 'assets/icon.png')).resize({ width: 18, height: 18 });
     tray = new Tray(trayIcon); tray.setToolTip('拾传 · 群聊文件投递');
@@ -250,5 +275,5 @@ app.on('second-instance', () => { const first = manager?.listGroups()[0]; if (fi
 app.on('before-quit', event => {
   if (quitting) return;
   event.preventDefault(); quitting = true;
-  Promise.allSettled([manager?.close(), saveQueue]).finally(() => { tray?.destroy(); app.quit(); });
+  Promise.allSettled([networkProxy?.close(), manager?.close(), uiServer?.close(), saveQueue]).finally(() => { tray?.destroy(); app.quit(); });
 });
