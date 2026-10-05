@@ -15,7 +15,7 @@ export type TransferStatus = 'preparing' | 'draft' | 'queued' | 'uploading' | 'd
 export type TransferItem = {
   id: string; groupId: string; groupName: string; direction: 'upload' | 'download'; name: string;
   size: number; status: TransferStatus; bytesTransferred: number; totalBytes?: number; progress?: number;
-  error?: string; localUri?: string; messageId?: string;
+  error?: string; localUri?: string; messageId?: string; mimeType?: string;
 };
 type Task = { item: TransferItem; group: Readonly<TransferGroup>; asset?: IncomingAsset; message?: TransferMessage; cancelled: boolean; native?: { cancelAsync(): Promise<void> }; folder?: string };
 type Manifest = { version: 1; id: string; groupId: string; baseUrl: string; name: string; mimeType?: string; size: number };
@@ -86,7 +86,7 @@ export class TransferManager {
     for (const asset of assets) {
       const id = randomUUID();
       const name = safeFileName(asset.name || asset.uri.split('/').pop() || '分享文件');
-      const task: Task = { group: locked, asset: { ...asset }, cancelled: false, item: { id, groupId: locked.id, groupName: locked.name || '传输群', direction: 'upload', name, size: asset.size || 0, status: 'preparing', bytesTransferred: 0 } };
+      const task: Task = { group: locked, asset: { ...asset }, cancelled: false, item: { id, groupId: locked.id, groupName: locked.name || '传输群', direction: 'upload', name, mimeType: asset.mimeType, size: asset.size || 0, status: 'preparing', bytesTransferred: 0 } };
       this.tasks.set(id, task); ids.push(id); this.emit();
       const preparing = this.prepare(task).finally(() => this.running.delete(id));
       this.running.set(id, preparing); await preparing;
@@ -132,7 +132,7 @@ export class TransferManager {
         const localUri = root + id + '/payload/' + saved.name;
         const info = await FS.getInfoAsync(localUri);
         if (!info.exists || info.isDirectory || info.size !== saved.size) continue;
-        this.tasks.set(id, { group: freezeGroup(group), cancelled: false, folder: root + id + '/', asset: { uri: localUri, name: saved.name, mimeType: saved.mimeType, size: saved.size }, item: { id, groupId: group.id, groupName: group.name || '传输群', direction: 'upload', name: saved.name, size: saved.size, localUri, status: 'draft', bytesTransferred: 0 } });
+        this.tasks.set(id, { group: freezeGroup(group), cancelled: false, folder: root + id + '/', asset: { uri: localUri, name: saved.name, mimeType: saved.mimeType, size: saved.size }, item: { id, groupId: group.id, groupName: group.name || '传输群', direction: 'upload', name: saved.name, mimeType: saved.mimeType, size: saved.size, localUri, status: 'draft', bytesTransferred: 0 } });
       } catch { /* Ignore incomplete copies; they cannot be sent. */ }
     }
     this.emit();
