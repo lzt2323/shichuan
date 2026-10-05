@@ -1,0 +1,96 @@
+name: Android APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/android.yml'
+permissions:
+  contents: read
+concurrency:
+  group: android-apk
+  cancel-in-progress: false
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CI: '1'
+      PICKDROP_ANDROID_PREVIEW: '1'
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install dependencies including build tools
+        run: pnpm install --frozen-lockfile --prod=false
+      - run: pnpm mobile:check
+      - run: pnpm test
+      - name: Generate Android native project
+        run: pnpm --dir apps/mobile exec expo prebuild --platform android --no-install --clean
+      - name: Install required Android SDK components
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-36' 'build-tools;36.0.0' 'ndk;27.1.12297006' 'cmake;3.22.1'
+      - name: Build standalone release APK with preview signing
+        working-directory: apps/mobile/android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --max-workers=2 -PreactNativeArchitectures=arm64-v8a '-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' 2>&1 | tee "$GITHUB_WORKSPACE/android-build.log"
+      - name: Verify APK and package release files
+        run: |
+          mkdir -p release-assets
+          VERSION=$(node -p "require('./apps/mobile/package.json').version")
+          APK="release-assets/PickDrop-$VERSION-Android-arm64-preview.apk"
+          cp apps/mobile/android/app/build/outputs/apk/release/app-release.apk "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK" > release-assets/ANDROID-BUILD.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" >> release-assets/ANDROID-BUILD.txt
+          unzip -l "$APK" | grep 'assets/index.android.bundle'
+          grep "package: name='app.pickdrop.mobile.preview'" release-assets/ANDROID-BUILD.txt
+          if grep -q 'application-debuggable' release-assets/ANDROID-BUILD.txt; then exit 1; fi
+          cd release-assets
+          sha256sum *.apk > SHA256SUMS.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-apk
+          path: release-assets/
+          if-no-files-found: error
+          compression-level: 0
+      - name: Upload build diagnostic log
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-build-log
+          path: android-build.log
+          if-no-files-found: ignore
+  publish:
+    needs: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: android-apk
+          path: release-assets
+      - name: Publish Android preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_COMMIT: ${{ github.sha }}
+        run: |
+          VERSION=$(node -p "require('./apps/mobile/package.json').version")
+          TAG="android-v$VERSION"
+          gh release create "$TAG" --target "$BUILD_COMMIT" --draft --title "拾传 Android $VERSION · 内测 APK" --notes-file docs/releases/android-preview.md
+          gh release upload "$TAG" release-assets/*
+          gh release edit "$TAG" --draft=false --prerelease
