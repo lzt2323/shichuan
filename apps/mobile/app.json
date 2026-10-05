@@ -2,7 +2,7 @@
   "expo": {
     "name": "拾传",
     "slug": "pickdrop",
-    "version": "0.3.1",
+    "version": "0.3.2",
     "orientation": "portrait",
     "scheme": "pickdrop",
     "userInterfaceStyle": "light",
@@ -24,7 +24,13 @@
       "permissions": [
         "android.permission.INTERNET",
         "android.permission.CAMERA"
-      ]
+      ],
+      "versionCode": 302,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#126A5A",
+        "monochromeImage": "./assets/monochrome-icon.png"
+      }
     },
     "plugins": [
       [
@@ -72,6 +78,10 @@
         }
       ],
       "./plugins/withPickDropDiscovery"
-    ]
+    ],
+    "icon": "./assets/icon.png",
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
   }
 }

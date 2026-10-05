@@ -1,0 +1,86 @@
+{
+  "concept": "A · 拾点 / Pick-up",
+  "colors": {
+    "teal": "#126A5A",
+    "mint": "#32C6A2",
+    "ivory": "#F3F5EE"
+  },
+  "viewBox": [
+    0,
+    0,
+    512,
+    512
+  ],
+  "files": [
+    {
+      "file": "mark.png",
+      "width": 1024,
+      "height": 1024
+    },
+    {
+      "file": "mark-mono.png",
+      "width": 1024,
+      "height": 1024
+    },
+    {
+      "file": "app-icon.png",
+      "width": 1024,
+      "height": 1024
+    },
+    {
+      "file": "app-icon-512.png",
+      "width": 512,
+      "height": 512
+    },
+    {
+      "file": "app-icon-256.png",
+      "width": 256,
+      "height": 256
+    },
+    {
+      "file": "app-icon-128.png",
+      "width": 128,
+      "height": 128
+    },
+    {
+      "file": "app-icon-64.png",
+      "width": 64,
+      "height": 64
+    },
+    {
+      "file": "app-icon-32.png",
+      "width": 32,
+      "height": 32
+    },
+    {
+      "file": "app-icon-16.png",
+      "width": 16,
+      "height": 16
+    },
+    {
+      "file": "mobile-icon.png",
+      "width": 1024,
+      "height": 1024
+    },
+    {
+      "file": "adaptive-foreground.png",
+      "width": 1024,
+      "height": 1024
+    },
+    {
+      "file": "monochrome-icon.png",
+      "width": 1024,
+      "height": 1024
+    },
+    {
+      "file": "trayTemplate.png",
+      "width": 18,
+      "height": 18
+    },
+    {
+      "file": "trayTemplate@2x.png",
+      "width": 36,
+      "height": 36
+    }
+  ]
+}

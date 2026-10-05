@@ -7,7 +7,7 @@ module.exports = {
   directories: { app: '.build/desktop', output: 'dist' },
   files: ['**/*', '!package-lock.json', '!pnpm-lock.yaml', '!node_modules/.modules.yaml'],
   asar: true,
-  win: { target: [{ target: 'portable', arch: ['x64'] }], signAndEditExecutable: false },
+  win: { target: [{ target: 'portable', arch: ['x64'] }], icon: 'apps/desktop/assets/icon.png', signExecutable: false },
   portable: { artifactName: `PickDrop-${version}-Windows.exe`, requestExecutionLevel: 'user' },
-  mac: { target: 'dir', identity: null, category: 'public.app-category.utilities' },
+  mac: { target: 'dir', identity: null, icon: 'apps/desktop/assets/icon.png', category: 'public.app-category.utilities' },
 };
