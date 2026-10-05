@@ -6,21 +6,23 @@
 
 源码仓库：[lzt2323/shichuan](https://github.com/lzt2323/shichuan)。安装包统一从 [GitHub Releases](https://github.com/lzt2323/shichuan/releases) 下载；源码历史不包含安装包和用户数据。开发分支、检查和标签发布约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 0.3.0 全平台内测版
+## 0.3.1 全平台内测版
 
-所有安装包集中在 [v0.3.0 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.3.0)，按系统下载一项即可：
+所有安装包集中在 [v0.3.1 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.3.1)，按系统下载一项即可：
 
 | 系统 | 文件 |
 | --- | --- |
-| Windows x64 | `PickDrop-0.3.0-Windows.exe` |
-| Mac Apple 芯片 | `PickDrop-0.3.0-Mac-AppleSilicon.zip` |
-| Android ARM64 | `PickDrop-0.3.0-Android-arm64-preview.apk` |
-| Linux x64 | `PickDrop-0.3.0-Linux-x64-TUI.tar.gz` |
-| Linux ARM64 | `PickDrop-0.3.0-Linux-arm64-TUI.tar.gz` |
+| Windows x64 | `PickDrop-0.3.1-Windows.exe` |
+| Mac Apple 芯片 | `PickDrop-0.3.1-Mac-AppleSilicon.zip` |
+| Android ARM64 | `PickDrop-0.3.1-Android-arm64-preview.apk` |
+| Linux x64 | `PickDrop-0.3.1-Linux-x64-TUI.tar.gz` |
+| Linux ARM64 | `PickDrop-0.3.1-Linux-arm64-TUI.tar.gz` |
 
 安装包自带运行资源，不需要 Node.js、Expo Go 或开发服务器。Linux 提供终端界面及命令行，可在 SSH 中使用；解压后运行包内 `pickdrop`，详细说明见 [Linux 使用指南](docs/linux.md)。暂不提供 Linux 图形窗口版、Intel Mac 包或 iOS IPA。
 
 Mac 未签名、公证；Android 为使用公开测试证书的「拾传内测」，采用独立包名 `app.pickdrop.mobile.preview`，正式版须另配私有签名。所有文件附统一 SHA256SUMS.txt。自动化构建不替代手机真机与各平台实际网络验证。
+
+桌面有加群申请时，窗口顶部固定显示设备名与「允许加入 / 拒绝」按钮；多条申请可点「查看全部」集中处理，不需要滚动聊天历史。成员页面也保留处理入口。
 
 ### 使用方法
 
@@ -69,6 +71,7 @@ pnpm test
 pnpm desktop:smoke
 pnpm desktop:motion
 pnpm desktop:visual
+pnpm desktop:requests
 ```
 
 若依赖安装脚本被关闭，执行 `node node_modules/electron/install.js` 安装 Electron 运行时。

@@ -11,6 +11,10 @@
     <button class="device-strip" id="members-button"><span id="member-avatars" class="member-avatars" aria-hidden="true"></span><span id="device-summary">连接中…</span><span class="connection-state"><span id="connection-dot" class="connection-dot offline"></span><span id="connection-status">连接中</span></span><span class="members-chevron" aria-hidden="true">›</span></button>
     <div id="group-menu" class="group-menu" hidden><div class="menu-label">已加入的群 · 点选打开独立窗口</div><div id="group-list"></div><div class="menu-divider"></div><button id="create-group">＋ 新建群</button><button id="join-group">＃ 输入邀请码</button><div class="menu-divider"></div><button id="invite-members">邀请设备加入</button><button id="view-members">本群成员与设备</button><button id="network-settings">网络连接设置</button></div>
     <button id="network-offline" class="network-offline" hidden>所选网络已断开 · 选择网络</button>
+    <section id="join-request-banner" class="join-request-banner" aria-label="待处理的加入申请" hidden>
+      <div class="join-request-heading"><span class="join-request-icon" aria-hidden="true">＋</span><strong id="join-request-summary" role="status" aria-live="polite"></strong></div>
+      <div class="join-request-controls"><button id="view-join-requests" type="button">查看详情</button><button id="deny-join-request" type="button" data-action="deny-join">拒绝</button><button id="approve-join-request" type="button" data-action="approve-join">允许加入</button></div>
+    </section>
     <main id="timeline" class="timeline" aria-label="当前群聊天记录" aria-live="polite"></main>
     <div id="uploads" class="uploads" aria-live="polite"></div>
     <form class="composer" id="composer"><button type="button" id="choose-file" title="发送文件" aria-label="发送文件">＋</button><input id="message-input" autocomplete="off" aria-label="消息内容" placeholder="发文件或说点什么…"><button type="submit" id="send-text" title="发送消息" aria-label="发送消息"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 4 15 8-15 8 3-8-3-8Z"/><path d="M8 12h12"/></svg></button></form>

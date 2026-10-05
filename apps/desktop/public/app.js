@@ -134,25 +134,69 @@ function updateFile(message, row) {
   if (label) { label.textContent = statusFor(message); label.classList.toggle('has-error', ready.get(message.id) === 'error'); }
   const retry = row.querySelector('.retry-action'); if (retry) retry.hidden = ready.get(message.id) !== 'error';
 }
+const respondingRequests = new Set();
+let requestsRevision = 0;
+const requestId = request => String(request.id || request.requestId);
+const requestName = request => request.device?.name || request.deviceName || request.name || '新设备';
+async function respondToRequest(request, allow) {
+  const id = requestId(request);
+  if (respondingRequests.has(id)) return;
+  respondingRequests.add(id); renderRequests();
+  try {
+    await bridge.respondJoin(id, allow);
+    requestsRevision++;
+    requests = requests.filter(item => requestId(item) !== id);
+    toast(allow ? '已允许设备加入' : '已拒绝这次申请');
+  } finally {
+    respondingRequests.delete(id); renderRequests();
+    // An older in-flight poll must not put a processed request back on screen.
+    if (requestsLoading) await requestsLoading.catch(() => {});
+    await refreshRequests();
+  }
+}
+function renderRequests() {
+  const banner = $('join-request-banner'), first = requests[0];
+  const timeline = $('timeline'), bottomGap = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
+  const wasVisible = !banner.hidden;
+  banner.hidden = !first;
+  if (first) {
+    const name = requestName(first), pending = respondingRequests.has(requestId(first));
+    $('join-request-summary').textContent = `${name} 申请加入`;
+    $('join-request-summary').title = `${name} 申请加入「${groupName()}」`;
+    $('view-join-requests').textContent = requests.length > 1 ? `查看全部（${requests.length}）` : '查看详情';
+    for (const [id, allow] of [['deny-join-request', false], ['approve-join-request', true]]) {
+      const button = $(id); button.disabled = pending;
+      button.onclick = () => respondToRequest(first, allow).catch(showError);
+    }
+  }
+  // Keep the latest message visible when the fixed strip appears/disappears;
+  // readers elsewhere in history retain their scroll position.
+  if (wasVisible !== !banner.hidden && bottomGap < 75 && !timeline.contains(document.activeElement) && !timeline.querySelector('.file-more[open]')) timeline.scrollTop = timeline.scrollHeight;
+  const memberEntry = $('member-join-requests');
+  if (memberEntry) { memberEntry.hidden = !requests.length; memberEntry.textContent = `处理加入申请（${requests.length}）`; }
+  if (panelKind !== 'requests' || !$('panel').open) return;
+  const body = $('panel-body');
+  const cards = requests.map(request => {
+    const card = element('div', 'request-card'); card.dataset.requestId = requestId(request);
+    card.append(element('strong', '', `${requestName(request)} 申请加入`), description(`允许后可查看「${groupName()}」的消息和文件。`));
+    const controls = element('div', 'request-actions');
+    for (const [label, allow] of [['拒绝', false], ['允许加入', true]]) {
+      const button = action(label, () => respondToRequest(request, allow));
+      button.dataset.action = allow ? 'approve-join' : 'deny-join'; button.disabled = respondingRequests.has(requestId(request)); controls.append(button);
+    }
+    card.append(controls); return card;
+  });
+  body.replaceChildren(...(cards.length ? cards : [description('加入申请已全部处理。')]));
+}
+function openRequests() {
+  openPanel('加入申请', 'requests'); renderRequests();
+  refreshRequests().catch(showError);
+}
 function renderMessages() {
   const timeline = $('timeline'), nearBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 75;
   const hadMessages = messageNodes.size > 0, desired = [], kept = new Set();
   // Messages retain their DOM nodes as presence and file readiness change, preserving
   // selection, keyboard focus and an open file menu during background updates.
-  for (const request of requests) {
-    const key = String(request.id || request.requestId);
-    let card = Array.from(timeline.querySelectorAll('[data-request-id]')).find(node => node.dataset.requestId === key);
-    if (!card) {
-      card = element('div', 'request-card'); card.dataset.requestId = key;
-      card.append(element('strong', '', `${request.device?.name || request.deviceName || request.name || '新设备'} 申请加入`), element('p', '', `批准后可查看「${groupName()}」的消息和文件。`));
-      const controls = element('div', 'request-actions');
-      const respond = async allow => { await bridge.respondJoin(request.id || request.requestId, allow); await refreshRequests(); };
-      const deny = action('拒绝', () => respond(false)); deny.dataset.action = 'deny-join';
-      const approve = action('允许加入', () => respond(true)); approve.dataset.action = 'approve-join';
-      controls.append(deny, approve); card.append(controls);
-    }
-    desired.push(card);
-  }
   if (!state.messages.length) {
     let empty = timeline.querySelector('.empty-state');
     if (!empty) {
@@ -358,6 +402,7 @@ async function openNetwork() {
 
 function openMembers() {
   const body = openPanel(`${groupName()} · 设备`, 'members'); body.append(description('离线设备仍保留在本群，重新上线后继续同步。'));
+  if (bridge?.listJoinRequests) body.append(action(`处理加入申请（${requests.length}）`, openRequests, 'primary-button', 'member-join-requests'));
   const devices = element('div'); devices.id = 'devices'; body.append(devices);
   if (bridge?.createInvite) body.append(action('＋ 邀请设备', openInvite, 'primary-button'));
   const settings = element('div', 'device-settings'); const label = element('label', '', '这台设备的名字'); label.htmlFor = 'device-name'; const name = input('设备名称', 'device-name', config.device.name); name.maxLength = 40;
@@ -366,13 +411,18 @@ function openMembers() {
     if (bridge) { const result = await bridge.rename(name.value.trim()); config.device = result.device || { ...config.device, name: name.value.trim() }; }
     else { config.device.name = name.value.trim(); localStorage.setItem('pickdrop-device', JSON.stringify(config.device)); }
     await api('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config.device) }); toast('设备名称已保存');
-  }, 'secondary-button', 'rename-device')); body.append(settings); if (bridge?.getNetwork) body.append(action('网络连接设置', openNetwork, 'secondary-button')); renderDevices();
+  }, 'secondary-button', 'rename-device')); body.append(settings); if (bridge?.getNetwork) body.append(action('网络连接设置', openNetwork, 'secondary-button')); renderDevices(); renderRequests();
 }
 async function refreshRequests() {
-  if (!bridge?.listJoinRequests || requestsLoading) return;
-  requestsLoading = true;
-  try { const result = await bridge.listJoinRequests(); const next = Array.isArray(result) ? result : result.requests || []; if (JSON.stringify(next) !== JSON.stringify(requests)) { requests = next; renderMessages(); } }
-  finally { requestsLoading = false; }
+  if (!bridge?.listJoinRequests) return;
+  if (requestsLoading) return requestsLoading;
+  const revision = requestsRevision;
+  requestsLoading = (async () => {
+    const result = await bridge.listJoinRequests();
+    const next = Array.isArray(result) ? result : result.requests || [];
+    if (revision === requestsRevision && JSON.stringify(next) !== JSON.stringify(requests)) { requests = next; renderRequests(); }
+  })().finally(() => { requestsLoading = false; });
+  return requestsLoading;
 }
 async function groupsChanged() {
   if (groupsLoading) return;
@@ -407,6 +457,7 @@ async function boot() {
 $('group-menu-button').onclick = async () => { if (!config) return; if (!$('group-menu').hidden) { closeMenu(); return; } $('group-menu').hidden = false; $('group-menu-button').setAttribute('aria-expanded', 'true'); busy(); try { await refreshGroups(); } catch (error) { showError(error); } };
 $('network-settings').onclick = () => openNetwork().catch(showError); $('network-offline').onclick = () => openNetwork().catch(showError);
 $('create-group').onclick = openCreate; $('join-group').onclick = openJoin; $('invite-members').onclick = () => openInvite().catch(showError); $('view-members').onclick = openMembers; $('members-button').onclick = () => { if (config) openMembers(); };
+$('view-join-requests').onclick = openRequests;
 $('close-panel').onclick = () => $('panel').close(); $('panel').addEventListener('close', () => { panelKind = ''; clearInterval(inviteTimer); busy(); });
 $('panel').addEventListener('click', event => { if (event.target === $('panel')) { const rect = $('panel').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('panel').close(); } });
 $('choose-file').onclick = () => $('file-input').click(); $('file-input').onchange = event => { sendFiles(Array.from(event.target.files)); event.target.value = ''; };
