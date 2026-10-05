@@ -6,14 +6,14 @@ Linux TUI 与 Mac、Windows、Android 使用同一群协议。终端主界面保
 
 在同一个 GitHub Release 中选择：
 
-- `PickDrop-0.3.3-Linux-x64-TUI.tar.gz`：常见 Intel / AMD 64 位 Linux。
-- `PickDrop-0.3.3-Linux-arm64-TUI.tar.gz`：64 位 ARM Linux。
+- `PickDrop-0.3.4-Linux-x64-TUI.tar.gz`：常见 Intel / AMD 64 位 Linux。
+- `PickDrop-0.3.4-Linux-arm64-TUI.tar.gz`：64 位 ARM Linux。
 
 解压后进入目录运行 `./pickdrop`。包内已包含 Node.js 24，无需安装 Node、npm、pnpm 或管理员权限。面向 glibc 系统，发布流水线使用 Ubuntu 24.04 对应架构验证；不支持 Alpine/musl，也不是 32 位 ARM 包。若下载后执行位丢失，运行 `chmod +x pickdrop runtime/bin/node`。保留完整目录；不要单独移动启动脚本。
 
 ```sh
-tar -xzf PickDrop-0.3.3-Linux-x64-TUI.tar.gz
-cd PickDrop-0.3.3-Linux-x64-TUI
+tar -xzf PickDrop-0.3.4-Linux-x64-TUI.tar.gz
+cd PickDrop-0.3.4-Linux-x64-TUI
 ./pickdrop
 ```
 
