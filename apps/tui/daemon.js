@@ -7,10 +7,12 @@ import WebSocket from 'ws';
 import { createGroupManager } from '../../server/groups.js';
 import { locations, privateDirectory, groupBy, completePath } from './common.js';
 import { TransferQueue } from './transfers.js';
+import { loadPreferences, validateDownloadDirectory } from './preferences.js';
 
 const publicGroup = ({ key, ...group }) => group;
 export async function createDaemon({ paths = locations(), managerOptions = {} } = {}) {
   await Promise.all([paths.data, paths.state, paths.runtime].map(privateDirectory));
+  const preferences = await loadPreferences(paths.config);
   // Publish the lock only after its owner file is fully written. A crash
   // between mkdir and writing pid can no longer strand an empty public lock.
   const claim = `${paths.lock}.${randomUUID()}.tmp`;
@@ -81,7 +83,7 @@ export async function createDaemon({ paths = locations(), managerOptions = {} } 
   async function dispatch(method, p = {}) {
     if (closed) throw new Error('后台服务正在停止');
     switch (method) {
-      case 'status': return { device: manager.device, groups: manager.listGroups().map(publicGroup), network: network(), transfers: transfers.list(), joins: [...joins.values()], discoveryError: lastError, pid: process.pid };
+      case 'status': return { device: manager.device, groups: manager.listGroups().map(publicGroup), network: network(), transfers: transfers.list(), joins: [...joins.values()], preferences: preferences.snapshot(), discoveryError: lastError, pid: process.pid };
       case 'snapshot': {
         const groups = manager.listGroups(), group = p.group ? groupBy(groups, p.group) : groups[0];
         return { ...await dispatch('status'), selectedGroupId: group?.id, state: group ? states.get(group.id) || { messages: [], devices: [] } : { messages: [], devices: [] }, requests: group ? requests.get(group.id) || [] : [] };
@@ -120,10 +122,15 @@ export async function createDaemon({ paths = locations(), managerOptions = {} } 
       }
       case 'receive': {
         const group = await connectedGroup(p.group), state = await api(group, '/api/state');
-        if (!p.directory || !path.isAbsolute(p.directory)) throw new Error('请选择绝对下载路径');
         const messages = state.messages.filter(m => m.type === 'file' && (p.all || m.id === p.messageId));
         if (!messages.length) throw new Error('找不到文件；请指定文件 ID 或使用 --all');
-        return messages.map(message => transfers.add('download', group.id, { messageId: message.id, directory: p.directory }));
+        const directory = await validateDownloadDirectory(p.directory ?? preferences.snapshot().downloadDirectory);
+        const tasks = [];
+        try {
+          for (const message of messages) tasks.push(transfers.add('download', group.id, { messageId: message.id, directory }));
+          if (p.directory !== undefined) await preferences.remember(directory);
+          return tasks;
+        } catch (error) { for (const task of tasks) transfers.cancel(task.id); throw error; }
       }
       case 'cancel': transfers.cancel(p.id); return { ok: true };
       case 'retry': transfers.retry(p.id); return { ok: true };

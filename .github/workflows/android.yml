@@ -32,6 +32,9 @@ jobs:
         run: pnpm install --frozen-lockfile --prod=false
       - run: pnpm mobile:check
       - run: pnpm test
+        env:
+          # React's act helper is available only in the test/development build.
+          NODE_ENV: test
       - name: Generate Android native project
         run: pnpm --dir apps/mobile exec expo prebuild --platform android --no-install --clean
       - name: Install required Android SDK components

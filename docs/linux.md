@@ -25,7 +25,40 @@ cd PickDrop-0.3.1-Linux-x64-TUI
 ./pickdrop stop
 ```
 
+### 在任意目录快速打开和关闭
+
+先将解压后的完整应用目录放在固定位置，在该目录执行一次：
+
+```sh
+./pickdrop install
+```
+
+这会把快捷命令安装到 `~/.local/bin/pickdrop`，不需要 sudo，也不会覆盖其他同名程序。如果安装器提示该目录不在 `PATH`，按提示运行 `export PATH="$HOME/.local/bin:$PATH"`，并将该行加入 `~/.bashrc` 或 `~/.zshrc` 以便新终端继续生效。
+
+之后在任意目录都可以使用：
+
+```sh
+pickdrop open          # 打开终端界面；直接输入 pickdrop 也可以
+pickdrop start         # 仅启动后台服务
+pickdrop --background  # 打开界面，退出后继续后台传输
+pickdrop stop          # 停止服务及未完成传输，已打开的界面随后退出
+```
+
+`Ctrl+C` 是退出当前界面的快捷键。默认直接启动时，会同时停止本次服务；连接已有后台服务时只退出界面。要明确停止后台，使用 `pickdrop stop`，重复执行也安全。
+
+应用目录移动或升级到新目录后，在新目录重新执行 `./pickdrop install` 更新快捷命令。`pickdrop uninstall` 仅移除快捷命令，不删除数据或安装目录；高级用法可通过 `--bin-dir /你的/bin` 指定快捷命令目录。
+
 ## 交互
+
+终端界面采用青绿工作台，随窗口尺寸即时调整。尺寸按终端的字符列和行计算，中文通常占两列：
+
+| 终端尺寸 | 布局 |
+| --- | --- |
+| 宽度至少 140 列、高度至少 26 行 | 左侧传输群、中间会话、右侧设备与当前群传输任务 |
+| 宽度 100–139 列、空间充足 | 左侧群与设备，右侧会话；传输摘要靠近输入区 |
+| 宽度不足 100 列，或高度较小 | 优先显示单栏会话、任务摘要与输入区；群和设备通过菜单进入 |
+
+所有布局保留文字与文件的共同时间线。侧栏收起不影响切群、发文件、下载、审批和任务操作。改变窗口尺寸不应丢失当前输入；较小终端会缩短提示，完整操作说明在 `Ctrl+P → 帮助与快捷键` 中。
 
 - `Ctrl+P`：菜单（创建群、附近的群、链接加入、邀请、网络、下载、审批、任务）。
 - `Ctrl+G`：切换群。`Enter`：发送文字。`PageUp / PageDown`：历史。
@@ -35,6 +68,8 @@ cd PickDrop-0.3.1-Linux-x64-TUI
 - `Esc` 返回，`Ctrl+U` 清空输入，`Ctrl+C` 退出界面。
 
 SSH 中文件选择器读写远端 Linux，界面显示当前机器名称。自动发现也发生在远端服务器的局域网；不能跨 SSH 自动发现你本地笔记本的网络。
+
+保存目录默认沿用**本机上一次成功加入下载队列时选择的目录**，在各个群之间共用，重启应用后仍保留；首次为 `~/Downloads/拾传`。选择失败、目录不可写或文件已失效时不会覆盖旧设置。命令行 `receive` 省略 `--dir` 也使用这个目录；显式指定 `--dir` 会在成功入队后更新默认值。
 
 首次加入可选择附近群再输入邀请码，或者粘贴完整邀请链接，随后由已有成员批准。创建群后“邀请”显示可达的局域网地址、短邀请码；终端足够大时显示二维码。网络菜单可选自动或具体接口。主动切换网络时正在传输会提示先完成或取消；自动发现被路由器阻止时尝试邀请链接，网络隔离和防火墙仍需解除。
 
@@ -73,6 +108,8 @@ systemctl --user enable --now pickdrop
 
 ## 数据与边界
 
+保存目录偏好写入 `$XDG_CONFIG_HOME/pickdrop/preferences.json`（默认 `~/.config/pickdrop/preferences.json`），使用原子替换，文件权限为 0600。
+
 数据在 `$XDG_DATA_HOME/pickdrop`（默认 `~/.local/share/pickdrop`），日志在 `$XDG_STATE_HOME/pickdrop`，本机 Unix socket 优先使用 `$XDG_RUNTIME_DIR/pickdrop`，否则使用私有 state/run。目录权限 0700、socket/密钥文件 0600。命令输出不会包含群密钥或审批轮询密钥；邀请命令会按操作目的显示临时邀请码。远端消息会移除终端控制字符，避免把文件名/消息当终端指令执行。
 
 传输任务与等待批准的加入申请暂存在服务内存；关闭/重启服务会中断，需重新发起。没有分块续传、目录同步、终端图片预览或公网中继。文件传输沿用当前 HTTP 局域网协议，并非端到端加密；只在可信局域网使用。当前不支持拖拽文件到 SSH 终端自动上传。
@@ -83,8 +120,11 @@ systemctl --user enable --now pickdrop
 pnpm install --frozen-lockfile
 pnpm tui
 pnpm test
+pnpm tui:visual
 pnpm linux:package --arch=x64
 pnpm linux:package --arch=arm64
 ```
+
+`tui:visual` 用隔离的演示数据捕获实际 Ink 输出，检查 160×40、120×30、80×24 和 60×18 四档尺寸；ANSI、纯文本和 PNG 预览保存在 `artifacts/tui/`。PNG 由 Chromium 展示字符输出生成，不替代真实 Linux 终端、字体与 SSH 的验收。
 
 打包根据锁定安装依赖复制生产依赖闭包，保留包许可证，下载 Node 官方运行时并校验官方 SHA-256。每个架构在对应 Linux runner 中执行安装包 help/status/后台创建群与消息收发 smoke；生成的 `BUILD-INFO.json` 记录版本和 Node 校验值。许可证保留在 `runtime/LICENSE` 和各 `app/node_modules` 包内。
