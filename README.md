@@ -8,19 +8,19 @@
 
 源码仓库：[lzt2323/shichuan](https://github.com/lzt2323/shichuan)。安装包统一从 [GitHub Releases](https://github.com/lzt2323/shichuan/releases) 下载；源码历史不包含安装包和用户数据。开发分支、检查和标签发布约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 0.3.3 全平台内测版
+## 0.3.4 全平台内测版
 
-新版采用 A「拾点」Logo，并包含青绿响应式 Linux TUI、快捷启停命令和记住上次保存目录。
+本版新增 Android 输入框长按粘贴图片：图片和文字位于同一输入框，点击发送才上传。保留 A「拾点」Logo、方向键 Linux TUI、快捷启停命令和保存目录记忆。
 
-所有安装包集中在 [v0.3.3 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.3.3)，按系统下载一项即可：
+所有安装包集中在 [v0.3.4 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.3.4)，按系统下载一项即可：
 
 | 系统 | 文件 |
 | --- | --- |
-| Windows x64 | `PickDrop-0.3.3-Windows.exe` |
-| Mac Apple 芯片 | `PickDrop-0.3.3-Mac-AppleSilicon.zip` |
-| Android ARM64 | `PickDrop-0.3.3-Android-arm64-preview.apk` |
-| Linux x64 | `PickDrop-0.3.3-Linux-x64-TUI.tar.gz` |
-| Linux ARM64 | `PickDrop-0.3.3-Linux-arm64-TUI.tar.gz` |
+| Windows x64 | `PickDrop-0.3.4-Windows.exe` |
+| Mac Apple 芯片 | `PickDrop-0.3.4-Mac-AppleSilicon.zip` |
+| Android ARM64 | `PickDrop-0.3.4-Android-arm64-preview.apk` |
+| Linux x64 | `PickDrop-0.3.4-Linux-x64-TUI.tar.gz` |
+| Linux ARM64 | `PickDrop-0.3.4-Linux-arm64-TUI.tar.gz` |
 
 安装包自带运行资源，不需要 Node.js、Expo Go 或开发服务器。Linux 提供终端界面及命令行，可在 SSH 中使用；解压后运行包内 `pickdrop`，详细说明见 [Linux 使用指南](docs/linux.md)。暂不提供 Linux 图形窗口版、Intel Mac 包或 iOS IPA。
 
@@ -58,6 +58,8 @@ Mac 未签名、公证；Android 为使用公开测试证书的「拾传内测�
 尚未实现：公网中继、可靠离线投递、托管设备故障切换、成员撤销与密钥轮换、文件夹发送、断点续传、已读回执。物理多屏热拔插及真实系统鼠标拖放仍需实机验证。
 
 `apps/mobile` 已接入新版多人传输群，采用蓝白会话界面。支持多群切换、附近发现、扫码或高级手动地址申请加入、成员审批、手机身份及群凭据安全保存、旧单收件箱迁移、前后台重连、分群文字草稿与文件待发区。手机通过系统分享保存/打开收到的文件，不使用桌面悬浮球。
+
+Android 剪贴板图片（v0.3.4 起）：复制图片后，在聊天输入框长按「粘贴」，图片直接加入同一个输入框，可继续输入文字或点 × 移除，点击发送才上传。没有独立预览区或额外的粘贴按钮；普通文字沿用系统编辑菜单。外接键盘支持 Ctrl+V 和 Shift+Insert。读取期间离开当前群会取消导入；单张最多 32 MiB，最多 10 张待发图片，添加剪贴板图片时待发文件合计不得超过 64 MiB。截图工具若只保存到相册而没有复制图片，请使用「＋」选文件或系统分享。请安装 v0.3.4 或更新的 Android 安装包，不能仅更新 JS；暂未接入输入法的图片候选插入。
 
 文件选择和外部分享先暂存为草稿，用户确认发送；传输锁定目标群，提供真实字节进度、取消和重试。收到的文件按群隔离缓存，校验大小和 SHA-256 后才能分享。暂存文件成功发送后清理；未发送文件可在重启后恢复。后台长时间传输、断点续传不作保证；失败时可回到前台重试。服务端尚无幂等上传，若提交成功但回包丢失，重试前应检查群记录，避免重复发送。
 

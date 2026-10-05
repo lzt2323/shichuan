@@ -85,6 +85,19 @@ test('system share is a durable draft, filename cannot overwrite manifest, and g
   assert.equal(noRestore.getSnapshot().length, 0);
 });
 
+test('image preview metadata and bytes survive draft restore and upload uses image MIME', async () => {
+  const env = setup();
+  const [id] = await env.manager.importIncoming(group(), [{ uri: 'content://source', name: '截图.png', mimeType: 'image/png' }]);
+  const image = env.manager.getSnapshot().find(item => item.id === id);
+  assert.equal(image.mimeType, 'image/png');
+  assert.deepEqual(env.files.get(image.localUri), content);
+  const restored = new env.Manager(); await restored.restoreDrafts([group()]);
+  assert.equal(restored.getSnapshot()[0].mimeType, 'image/png');
+  await restored.startGroupDrafts('group-A');
+  assert.equal((await settle(restored, id)).status, 'completed');
+  assert.equal(env.uploads[0].options.headers['Content-Type'], 'image/png');
+});
+
 test('picker captures destination before asynchronous selection', async () => {
   const env = setup(), original = group(); let resolve;
   env.state.pick = () => new Promise(r => { resolve = r; });
