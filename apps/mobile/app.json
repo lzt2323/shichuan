@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "拾传",
+    "slug": "pickdrop",
+    "version": "0.2.1",
+    "orientation": "portrait",
+    "scheme": "pickdrop",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "bundleIdentifier": "app.pickdrop.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "拾传需要连接局域网里的电脑，以传送你的文件和消息。",
+        "NSAppTransportSecurity": { "NSAllowsLocalNetworking": true, "NSAllowsArbitraryLoads": true },
+        "UIFileSharingEnabled": true,
+        "LSSupportsOpeningDocumentsInPlace": true
+      }
+    },
+    "android": { "package": "app.pickdrop.mobile", "permissions": ["android.permission.INTERNET", "android.permission.CAMERA"] },
+    "plugins": [
+      ["expo-camera", { "cameraPermission": "允许拾传扫描电脑上的配对二维码", "recordAudioAndroid": false, "barcodeScannerEnabled": true }],
+      "expo-secure-store",
+      ["expo-sharing", {
+        "android": { "enabled": true, "singleShareMimeTypes": ["*/*"], "multipleShareMimeTypes": ["*/*"] },
+        "ios": {
+          "enabled": true,
+          "appGroupId": "group.app.pickdrop.mobile",
+          "extensionBundleIdentifier": "app.pickdrop.mobile.share",
+          "activationRule": { "supportsText": true, "supportsWebUrlWithMaxCount": 10, "supportsImageWithMaxCount": 20, "supportsMovieWithMaxCount": 20, "supportsFileWithMaxCount": 20, "supportsAttachmentsWithMaxCount": 20 }
+        }
+      }],
+      ["expo-build-properties", { "android": { "usesCleartextTraffic": true } }]
+    ]
+  }
+}

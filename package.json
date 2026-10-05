@@ -1,0 +1,36 @@
+{
+  "name": "pickdrop",
+  "version": "0.2.1",
+  "packageManager": "pnpm@11.19.0",
+  "engines": { "node": ">=24" },
+  "private": true,
+  "type": "module",
+  "description": "拾传：聊天式局域网文件收件箱",
+  "main": "apps/desktop/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server/cli.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check server/index.js && node --check server/groups.js && node --check server/pairing.js && node --check server/discovery.js && node --check apps/desktop/main.cjs && node --check apps/desktop/preload.cjs && node --check apps/desktop/window-controller.cjs && node --check apps/desktop/public/app.js",
+    "desktop:smoke": "node scripts/desktop-groups-smoke.js",
+    "desktop:package": "pnpm desktop:prepare && electron-builder --config electron-builder.cjs --mac dir --arm64 && node scripts/archive-mac.js",
+    "desktop:package:windows": "pnpm desktop:prepare && electron-builder --config electron-builder.cjs --win portable --x64",
+    "mobile:start": "pnpm --dir apps/mobile start",
+    "mobile:web": "pnpm --dir apps/mobile web",
+    "mobile:smoke": "node scripts/mobile-ui-smoke.js",
+    "mobile:check": "pnpm --dir apps/mobile check",
+    "mobile:export": "pnpm --dir apps/mobile export:check",
+    "desktop:prepare": "node scripts/prepare-desktop.js",
+    "desktop:motion": "node scripts/desktop-motion-smoke.js",
+    "desktop:visual": "node scripts/desktop-visual-smoke.js"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4",
+    "ws": "8.18.3"
+  },
+  "devDependencies": {
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "playwright": "1.62.1"
+  }
+}

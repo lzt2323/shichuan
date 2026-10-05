@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>拾传 Mini：群聊小窗设计方案</title><style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;color:#252a28;background:#f8f9f7;line-height:1.75}body{max-width:900px;margin:auto;padding:48px 24px 80px}h1{font-size:32px;line-height:1.25;font-weight:600;letter-spacing:-.8px}h2{font-size:21px;margin-top:38px;font-weight:550}p,li{font-size:15px}a{color:#226747}small{color:#69776f}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;vertical-align:top;padding:12px 10px;border-bottom:1px solid #dce4dc}th{font-weight:500;color:#52705e}code{background:#ebefe9;border-radius:4px;padding:2px 5px}.lead{font-size:20px;max-width:700px}.rule{border-left:3px solid #367c56;padding:8px 18px;background:#eef4eb}.flow{font-size:17px;padding:18px 0;border-top:1px solid #dce4dc;border-bottom:1px solid #dce4dc}@media(max-width:520px){body{padding:24px 16px}h1{font-size:28px}th,td{padding:9px 5px;font-size:12px}}
+</style></head><body>
+<small>设计方案 · 2026-10-03 · 桌面优先</small><h1>拾传 Mini<br>一个群，一个随手能用的小窗。</h1>
+<p class="lead">平时留在屏幕边缘。文件拖过来，小窗展开；松手发到这个群，其他设备收到后直接拿走。</p>
+<p class="rule">Group 的含义已经确认：类似 QQ 群或微信群的共享会话。每个群有独立成员、消息、文件、邀请码和窗口；一个设备可以同时加入多个群。切换或创建群不会把当前群窗口变成另一个群。</p>
+<h2>2026-10-04：已选方案实施</h2>
+<p class="rule">用户选定多人文件传输会话与小半球方案。当前桌面源码已更新为蓝白会话、成员头像、紧凑文件卡与更多菜单；侧边收起为12×24半球，顶部收起为24×12半球，顶部定位于菜单栏下方的可用工作区。新窗口默认340×470，旧窗口保留其已保存尺寸。</p>
+<p>支持左、右、顶部松手吸附，小半球可直接拖出，悬停约180ms展开，离开约800ms收起。透明窗口通过右下角把手缩放。已增加三边拖出、透明像素、自定义缩放和多群回归检查；以下早期24×88边签描述为调研历史，实际行为以此节与README为准。</p>
+<p><a href="ui-concepts/2026-10-04/D-group-transfer-halfball.png">查看用户选定的视觉方案</a></p>
+<h2>2026-10-04：自由拖动与手机端调研</h2>
+<p class="rule">本轮桌面源码已加入：明确拖动把手、松手才吸附、边签直接拖出、24×88直边边签、180ms可打断的窗口过渡、边缘候选提示，以及系统减少动态效果支持。手机端以下内容仍是后续方案，尚未接入新群协议。</p>
+<table><thead><tr><th>重点参考</th><th>可借鉴的行为</th><th>实现边界</th></tr></thead><tbody>
+<tr><td><a href="https://dropoverapp.com/whats-new/4.4.0">Dropover · Dock shelves</a></td><td>拖到边缘停靠、拖回屏幕解除停靠，停靠中继续接收文件。</td><td>本次桌面交互主参考。采用产品思路，不依赖其私有实现。</td></tr>
+<tr><td><a href="https://eternalstorms.at/yoink/mac/">Yoink</a></td><td>边缘文件架，随拖放动作出现。</td><td>保留每群稳定入口，避免用户找不到投放目标。</td></tr>
+<tr><td><a href="https://github.com/MrKai77/Loop/blob/develop/Loop/Core/WindowDragManager.swift">Loop · WindowDragManager</a></td><td>拖动期间预览，松手才提交。</td><td>Swift/macOS、GPL-3.0；只参考状态划分，未复制代码。</td></tr>
+<tr><td><a href="https://github.com/localsend/localsend">LocalSend</a></td><td>移动端文件选择与系统分享扩展。</td><td>Flutter/Rust、Apache-2.0；适合作为原生接入流程参考。</td></tr>
+</tbody></table>
+<h3>桌面交互参数</h3>
+<p>以下是拾传当前实现的初值，不是竞品公布的参数：拖动5px后开始移动；靠近左右边缘24px内显示「松手贴边」；松手吸附动画180ms；悬停250ms展开；离开800ms收起。拖动时直接跟随指针，不做缓动追赶。聊天内容在展开、收起时保持固定宽度，窗口边界负责裁切，避免反复换行。</p>
+<p>指针仍按住时不触发吸附，用户可以穿过显示器接缝。点击图钉保持展开；文件进入边签即开始展开。边签命中范围就是实际24px窗口，不用覆盖整条屏幕边缘的透明窗口。</p>
+<h3>手机端：从文件出发，进入群会话</h3>
+<div style="display:flex;gap:18px;flex-wrap:wrap;margin:24px 0">
+<div style="width:260px;min-height:360px;border:1px solid #d6dfd8;border-radius:24px;padding:24px 18px;background:white;box-shadow:0 12px 36px #253b3008">
+<small>手机首页 · 设计示意</small><h3 style="margin:16px 0">我的群 <span style="float:right;color:#64876b">＋</span></h3>
+<div style="padding:15px 0;border-bottom:1px solid #e5eae6"><b>工作资料</b><br><small>方案.pdf · 刚刚 · 2台在线</small></div>
+<div style="padding:15px 0;border-bottom:1px solid #e5eae6"><b>我的设备</b><br><small>3张照片 · 10分钟前</small></div>
+<p style="font-size:13px;color:#89978b;margin-top:36px">常用群和最近文件放在一起，<br>点群继续查看文件和消息。</p>
+</div>
+<div style="width:260px;min-height:360px;border:1px solid #d6dfd8;border-radius:24px;padding:24px 18px;background:white;box-shadow:0 12px 36px #253b3008">
+<small>系统分享 → 拾传 · 设计示意</small><h3 style="margin:16px 0">发送到哪个群？</h3>
+<div style="background:#eff4ee;padding:14px;border-radius:10px">▤ 方案.pdf<br><small>2.4 MB · 已选择1个文件</small></div>
+<div style="padding:14px 0">◉ 工作资料 <small>2台在线</small></div><div style="padding:4px 0 18px">○ 我的设备</div>
+<div style="padding:11px;background:#4f795f;color:white;text-align:center;border-radius:9px">发送到工作资料</div>
+<small style="display:block;margin-top:12px">发送前确认目标群与文件。</small>
+</div></div>
+<ol><li><b>先接新群协议：</b>手机当前仍使用旧版收件箱连接地址。需要统一设备身份、多群持久化、6位邀请码申请和审批、断线重连；先确保手机能进桌面端的群。</li>
+<li><b>系统分享进入：</b>相册/文件管理器/浏览器 → 分享 → 拾传 → 最近群 → 确认内容 → 发送。App内提供照片、文件与文字入口，保持完整替代路径。</li>
+<li><b>文件卡片操作：</b>点击预览，提供明确的保存与分享按钮；长按多选。每个文件拥有进度和重试，避免全局busy锁住整个界面。</li>
+<li><b>顺应系统手势：</b>左右边缘保留系统返回，底部适配安全区与键盘；iPad可后续做双栏和跨应用拖放。参考<a href="https://developer.android.com/develop/ui/views/touch-and-input/gestures/gesturenav">Android手势规范</a>和<a href="https://developer.apple.com/design/human-interface-guidelines/drag-and-drop">Apple拖放规范</a>。</li></ol>
+<p><b>原生接入选择：</b>项目使用Expo 57。<a href="https://docs.expo.dev/versions/v57.0.0/sdk/sharing/">expo-sharing 57</a>已有实验性接收系统分享能力，可以先做Android验证；官方明确提示其iOS实现会由分享扩展打开主App，此方式未获Apple正式支持。iOS正式方案应评估原生Share Extension，在扩展中选择群，借助App Group共享文件；较长传输参考<a href="https://developer.apple.com/library/archive/documentation/General/Conceptual/ExtensibilityPG/ExtensionScenarios.html">Apple扩展与后台传输机制</a>。仍需真机、局域网权限和后台生命周期验证。</p>
+<h3>本轮验证边界</h3>
+<p>单元测试覆盖按住不吸附、松手提交、边签拖出、取消、动画中断、图钉和减少动态效果。Electron交互检查使用真实窗口与渲染器指针事件，屏幕指针坐标受控模拟；不等于Mac/Windows物理鼠标、多屏混合DPI和系统文件拖放的实测。当前没有产出新的手机安装包。</p>
+<h2>借鉴的成熟交互</h2>
+<table><thead><tr><th>参考</th><th>已验证的产品机制</th><th>拾传的设计选择</th></tr></thead><tbody>
+<tr><td><a href="https://eternalstorms.at/yoink/mac/">Yoink</a></td><td>文件托盘可在靠近屏幕边缘时出现，暂存内容后拖出。</td><td>默认使用稳定的贴边入口；拖到指定群边签即展开。</td></tr>
+<tr><td><a href="https://dropoverapp.com/">Dropover</a></td><td>小型文件托盘、拖拽唤起、固定托盘、Dock shelves。</td><td>窗口只保留发送与接收所需内容；可固定悬浮或贴边。</td></tr>
+<tr><td><a href="https://github.com/schlagmichdoch/PairDrop#persistent-device-pairing">PairDrop</a></td><td>6位码/二维码配对、持久记住设备；公共房间是临时机制。</td><td>短码只用于首次入群；本产品的群和成员长期保留。</td></tr>
+<tr><td><a href="https://github.com/localsend/protocol">LocalSend 协议</a></td><td>局域网设备发现，稳定指纹与可变化的网络地址分离。</td><td>保存设备与群的稳定身份，发现新 IP 后恢复连接。</td></tr>
+</tbody></table>
+<h2>群聊与窗口</h2>
+<ul><li>首次启动默认建立「我的设备」。可新建「工作资料」「家里」「临时交换」等群。</li><li>一个群对应一个可独立移动、缩放、固定和贴边的小窗。同一个群重复打开时唤回原窗口，避免出现重复会话。</li><li>群名下拉列出已加入的群，点击会打开或聚焦对应独立窗口。菜单中放「新建群聊」「输入邀请码加入」「本群设备」「邀请设备」。</li><li>发到群里的文字和文件只进入该群。同一台电脑可以加入多个群；移出一个群不影响其他群。</li><li>群的稳定 ID 与可修改名称分离，设备离线仍保留在成员列表。</li></ul>
+<h2>小窗的最小结构</h2>
+<table><thead><tr><th>区域</th><th>设计</th></tr></thead><tbody>
+<tr><td>尺寸</td><td>默认约320×420；最小280×340。使用系统逻辑像素，保留缩放与位置，不把文字随窗口比例压小。</td></tr>
+<tr><td>标题栏</td><td>一行：群图标、群名下拉、固定展开、收起到边缘。标题空白处可拖动窗口。</td></tr>
+<tr><td>设备状态</td><td>紧凑一行「3台设备 · 2在线」。点击查看成员，离线成员显示等待自动重连。</td></tr>
+<tr><td>内容</td><td>短文字气泡、紧凑文件卡。文件显示名称、大小、来源、接收状态；完成后可直接拖出。</td></tr>
+<tr><td>输入</td><td>默认单行，左侧加号选择文件，Enter发送；占位文字「发到工作资料…」明确发送目标。</td></tr>
+<tr><td>视觉</td><td>灰白背景、细分隔线、系统字体、少量绿色用于发送/完成。无常驻侧栏，功能配置收进群菜单。</td></tr>
+</tbody></table>
+<h2>悬浮与贴边规则</h2>
+<p class="flow">悬浮小窗 → 拖到左右边缘或点击收起 → 群边签 → 文件拖入感应区 → 展开 → 松手发送</p>
+<ul><li>每群一个24×88的直边边签，保留群简称；未读提示作为后续增强。多个边签排列、不互相覆盖，完整群名可通过悬停查看。</li><li>文件进入边签区域立即展开；普通鼠标停留约250毫秒展开。展开/收起动画约180毫秒，遵循系统减少动态效果设置。</li><li>临时展开后，鼠标离开约800毫秒收起；输入、选字、群菜单、邀请审批、拖入或拖出文件期间保持展开。</li><li>「固定展开」让小窗持续悬浮。收到文件时边签提示新内容，默认不抢焦点弹出大窗口。</li><li>收起只隐藏界面，传输继续。菜单栏/托盘保留恢复群窗口与退出应用的入口。</li><li>避免覆盖系统热角和菜单栏/Dock；多屏分别记录停靠边与位置。拔掉显示器后把窗口移回可见屏幕。</li></ul>
+<h2>邀请码与设备记忆</h2>
+<p class="flow">群菜单「邀请设备」 → 482 916 → 新设备输入 → 群内设备确认 → 永久记住该设备与群</p>
+<ul><li>邀请码为6位数字，分成两段展示，5分钟有效、单次使用；过期可重新生成。</li><li>输入邀请码只是申请入群。已有可信成员确认设备名称后，新设备才获得长期群凭据。</li><li>重启后恢复已加入的群、设备、窗口位置、消息和已接收文件。IP变化时通过局域网发现重新定位，不要求重新配对。</li><li>保存的是设备身份和群关系，不只是一条带 IP 的网址。离线与未配对必须是两个不同状态。</li><li>第一阶段邀请码用于同一局域网。跨网络找设备需要另行增加协调/中继服务，不能靠缩短现有 URL 实现。</li></ul>
+<h2>发送与异常状态</h2>
+<ul><li>拖入时覆盖层明确写出「松开，发到工作资料」；送达记录留在这个群窗口。</li><li>接收中显示进度，文件完整落盘后才允许原生拖出。不能显示一个尚不可用的“可拖出”状态。</li><li>显示「已发送至收件箱」与「某设备已接收」时应有对应的真实证据；不能把服务端上传完成当作所有群成员已收到。</li><li>网络断开时保留群和内容，显示等待重新连接。第一阶段继续采用每群托管电脑架构：托管机离线时明确提示等待它上线，不暗示任意设备均能中继。</li><li>选择文件、改变群窗口位置或收起窗口，都不改变已经开始上传的目标群。</li></ul>
+<h2>实现与验收</h2>
+<p>保留现有文件流式收发、SHA-256校验和原生拖出能力。将单一收件箱扩展成多个独立群服务；增加群注册表、设备发现、短码申请和审批；桌面按群维护独立窗口和缓存。Electron 已提供置顶、尺寸与多屏信息接口，贴边触发使用小范围可接收拖拽的原生窗口；全局外部拖拽检测、全屏和多显示器差异需要分别实测。参考 <a href="https://www.electronjs.org/docs/latest/api/browser-window">BrowserWindow</a>、<a href="https://www.electronjs.org/docs/latest/api/screen">screen</a>。</p>
+<ol><li>两个群同时打开：A群消息和文件不会出现在B群，B群窗口位置不随A变化。</li><li>创建/加入群后得到独立小窗；重启后仍有原有群、成员、记录和固定状态。</li><li>6位码申请、批准、拒绝、过期和限流均有真实后端结果。</li><li>IP地址改变后重新发现可信群服务；伪造发现公告不能诱导发送长期凭据。</li><li>两群贴边互不覆盖；拖入到指定边签后正确发到该群；从接收卡拖到桌面得到真实文件。</li><li>320×420与280×340下标题、消息、输入和审批均可操作。Mac/Windows分别验证系统拖放与贴边行为。</li></ol>
+<p>手机端沿用相同群与设备关系，使用群列表进入各自会话和系统分享入口。悬浮、贴边、多窗口是桌面端的主要交互。</p>
+<small>本文件记录设计目标与验收标准；实际实现与已验证范围以项目README和测试结果为准。交互预览中的传输、设备和邀请码为演示数据。</small>
+</body></html>
