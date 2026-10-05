@@ -7,6 +7,10 @@ import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import { randomUUID, randomBytes } from 'node:crypto';
+import { Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { createRequire } from 'node:module';
+const { createNetworkTransferScope } = createRequire(import.meta.url)('../apps/desktop/network-transfers.cjs');
 import { WebSocketServer } from 'ws';
 import { normalizeInterfaces, chooseNetwork, publicEndpoint } from '../server/network.js';
 import { createLanDiscovery, discoveryTxt, parseDiscoveredService, restrictServiceAddress } from '../server/discovery.js';
@@ -166,4 +170,24 @@ test('CONNECT forwards only a known origin and closes when the upstream disconne
   const response = await new Promise(resolve => socket.once('data', data => resolve(data.toString()))); assert.match(response, /200 Connection Established/);
   const closed = new Promise(resolve => socket.once('close', resolve));
   socket.write(`GET /api/files/abort HTTP/1.1\r\nHost: ${new URL(f.baseUrl).host}\r\n\r\n`); socket.resume(); await closed; assert.equal(f.seenAddress(), f.address);
+});
+
+
+test('desktop native downloads abort on adapter loss and release leases without waiting for the socket timeout', async t => {
+  const manager = await fixture(t), scope = createNetworkTransferScope();
+  const upstream = http.createServer((_req, res) => { res.writeHead(200); res.write('partial file'); });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { upstream.close(resolve); upstream.closeAllConnections(); }));
+  const lease = manager.acquireTransfer(), operation = scope.begin();
+  const response = await new Promise((resolve, reject) => {
+    const request = http.get(`http://127.0.0.1:${upstream.address().port}/large-file`, { signal: operation.signal, timeout: 3600000 }, resolve); request.on('error', reject);
+  });
+  const transfer = pipeline(response, new Writable({ write(_chunk, _encoding, done) { done(); } }), { signal: operation.signal }).finally(() => { operation.release(); lease(); });
+  const rejected = assert.rejects(transfer, error => error.name === 'AbortError' || error.code === 'ECONNRESET');
+  scope.networkChanged({ available: true, switching: false }); assert.equal(operation.signal.aborted, false);
+  assert.equal(manager.getNetwork().transferBusy, true);
+  scope.networkChanged({ available: false, switching: true }); await rejected;
+  assert.equal(scope.size, 0); assert.equal(manager.getNetwork().transferBusy, false);
+  await manager.setNetwork({ mode: 'manual', id: vpn.id });
+  assert.equal(manager.getNetwork().selected.name, 'vpn');
 });

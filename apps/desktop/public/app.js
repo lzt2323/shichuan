@@ -317,8 +317,12 @@ let networkPanelEpoch = 0;
 const networkType = type => ({ wifi: 'Wi-Fi', ethernet: '有线网络', vpn: 'VPN', virtual: '虚拟网卡', unknown: '网络' }[type] || '网络');
 function networkState(next) {
   if (!config) return; config.network = next;
-  $('network-offline').hidden = !bridge || Boolean(next?.available);
-  $('network-offline').textContent = next?.switching ? '正在切换网络…' : '所选网络已断开 · 选择网络';
+  const label = $('network-offline'), selected = next?.selected;
+  label.hidden = !bridge;
+  label.classList.toggle('is-offline', !next?.available);
+  label.textContent = next?.switching ? '正在切换网络…' : next?.available && selected ? `${networkType(selected.type)} · ${selected.address} ▾` : '所选网络已断开 · 选择网络 ▾';
+  label.title = selected ? `${networkType(selected.type)} · ${selected.name} · ${selected.cidr || selected.address}` : '选择已连接的 Wi-Fi 或有线网络';
+  label.setAttribute('aria-label', `${label.textContent.replace(' ▾', '')}，打开网络设置`);
 }
 async function openNetwork() {
   if (!bridge?.getNetwork) return;
@@ -329,7 +333,7 @@ async function openNetwork() {
   body.append(description('群监听、附近设备发现与传输共用此网络。网络断开后会等待原连接，不会自动换到其他网卡。'));
   const selected = next.selected;
   const current = element('div', 'network-current');
-  current.append(element('strong', '', selected ? `${networkType(selected.type)} · ${selected.name}` : '尚未选择网络'), element('span', '', selected ? `${selected.address} · ${next.available ? '已连接' : '已断开'}` : '请连接 Wi-Fi 或有线网络'));
+  current.append(element('strong', '', selected ? `${networkType(selected.type)} · ${selected.name}` : '尚未选择网络'), element('span', '', selected ? `${selected.cidr || selected.address} · ${next.available ? '已连接' : '已断开'}` : '请连接 Wi-Fi 或有线网络'));
   body.append(current);
   const form = element('div', 'network-options');
   const row = (value, label, detail, checked) => {
@@ -338,7 +342,7 @@ async function openNetwork() {
   };
   form.append(row('auto', '自动选择', '优先已连接的 Wi-Fi / 有线网络；点应用可重新选择', next.selection.mode === 'auto'));
   const physical = next.interfaces.filter(item => !item.virtual), virtual = next.interfaces.filter(item => item.virtual);
-  const choice = item => row(item.id, `${networkType(item.type)} · ${item.name}`, `${item.address}${item.description ? ` · ${item.description}` : ''}`, next.selection.mode === 'manual' && selected?.id === item.id);
+  const choice = item => row(item.id, `${networkType(item.type)} · ${item.name}`, `${item.cidr || item.address}${!item.cidr && item.netmask ? ` · 子网掩码 ${item.netmask}` : ''}${item.description ? ` · ${item.description}` : ''}`, next.selection.mode === 'manual' && selected?.id === item.id);
   physical.forEach(item => form.append(choice(item)));
   if (virtual.length) { const details = element('details', 'network-virtual'), summary = element('summary', '', `VPN / 虚拟网络（${virtual.length}）`); details.append(summary); virtual.forEach(item => details.append(choice(item))); if (selected?.virtual && next.selection.mode === 'manual') details.open = true; form.append(details); }
   body.append(form);

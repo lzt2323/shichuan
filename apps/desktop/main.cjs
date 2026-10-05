@@ -7,6 +7,8 @@ const { createWriteStream, createReadStream } = require('node:fs');
 const { randomUUID, createHash } = require('node:crypto');
 const { Readable, Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
+const { createNetworkTransferScope } = require('./network-transfers.cjs');
+const networkTransfers = createNetworkTransferScope();
 const { initialBounds, createWindowController } = require('./window-controller.cjs');
 
 let manager, config, configPath, tray, uiOrigin, uiServer, networkProxy, quitting = false, saveQueue = Promise.resolve();
@@ -54,7 +56,7 @@ async function prepareFile(record, id) {
     catch (error) { if (error.code !== 'ENOENT') throw error; prepared.delete(key); }
   }
   if (pending.has(key)) return pending.get(key);
-  let release;
+  let release, downloadSignal;
   const operation = (async () => {
     const hosted = manager.getHostedInbox(group.id);
     if (hosted) {
@@ -62,10 +64,12 @@ async function prepareFile(record, id) {
       if (!local) throw new Error('文件不存在');
       await fs.access(local.path); prepared.set(key, local.path); return local.path;
     }
-    release = manager.acquireTransfer();
+    const releaseLease = manager.acquireTransfer(), cancellation = networkTransfers.begin();
+    release = () => { cancellation.release(); releaseLease(); };
+    const signal = cancellation.signal; downloadSignal = signal;
     group = await manager.resolveGroup(group.id);
     if (!group.online) throw new Error('群主机离线，请检查所选网络');
-    const state = await manager.authenticated(group.id, '/api/state'), message = state.messages.find(item => item.id === id && item.type === 'file');
+    const state = await manager.authenticated(group.id, '/api/state', { signal }), message = state.messages.find(item => item.id === id && item.type === 'file');
     if (!message) throw new Error('找不到这个文件');
     if (!/^[a-f0-9]{64}$/i.test(message.sha256)) throw new Error('文件校验信息不正确');
     const { safeFileName } = await import('../../shared/protocol.js');
@@ -83,7 +87,7 @@ async function prepareFile(record, id) {
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     const download = await new Promise((resolve, reject) => {
       const target = new URL(`${group.baseUrl}/api/files/${id}`), transport = target.protocol === 'https:' ? https : http;
-      const request = transport.get(target, { headers: requestHeaders, localAddress: manager.getNetwork().selected.address, timeout: 60 * 60 * 1000 }, resolve);
+      const request = transport.get(target, { headers: requestHeaders, localAddress: manager.getNetwork().selected.address, signal, timeout: 60 * 60 * 1000 }, resolve);
       request.on('timeout', () => request.destroy(new Error('文件接收超时'))); request.on('error', reject);
     });
     if (download.statusCode !== 200) { download.destroy(); throw new Error('文件接收失败'); }
@@ -91,11 +95,11 @@ async function prepareFile(record, id) {
     let bytes = 0;
     const meter = new Transform({ transform(chunk, enc, callback) { bytes += chunk.length; hash.update(chunk); callback(null, chunk); } });
     try {
-      await pipeline(download, meter, createWriteStream(partial, { mode: 0o600 }));
+      await pipeline(download, meter, createWriteStream(partial, { mode: 0o600 }), { signal });
       if (hash.digest('hex') !== message.sha256 || bytes !== message.size) throw new Error('文件完整性校验失败，请重新接收');
       await fs.rename(partial, output); prepared.set(key, output); return output;
     } catch (error) { await fs.rm(partial, { force: true }); throw error; }
-  })().finally(() => release?.());
+  })().catch(error => { if (downloadSignal?.aborted) throw new Error('所选网络已断开，文件接收已停止，请重新连接后重试'); throw error; }).finally(() => release?.());
   pending.set(key, operation);
   try { return await operation; } finally { pending.delete(key); }
 }
@@ -252,7 +256,7 @@ else app.whenReady().then(async () => {
     await session.fromPartition('persist:pickdrop-groups').setProxy({ proxyRules: networkProxy.address, proxyBypassRules: '127.0.0.1;localhost' });
     registerIPC();
     manager.events.on('groups-changed', () => { broadcast('groups:changed', publicGroups()); updateTray(); });
-    manager.events.on('network-changed', value => { if (value.switching || !value.available) networkProxy.disconnect(); broadcast('network:changed', value); });
+    manager.events.on('network-changed', value => { networkTransfers.networkChanged(value); if (value.switching || !value.available) networkProxy.disconnect(); broadcast('network:changed', value); });
     manager.events.on('network-error', error => console.warn('Network:', error.message));
     manager.events.on('discovery-error', error => console.warn('Discovery:', error.message));
     manager.events.on('requests-changed', () => broadcast('requests:changed', {}));
@@ -274,6 +278,6 @@ app.on('activate', () => { const first = manager?.listGroups()[0]; if (first) op
 app.on('second-instance', () => { const first = manager?.listGroups()[0]; if (first) openGroup(first.id).catch(showError); });
 app.on('before-quit', event => {
   if (quitting) return;
-  event.preventDefault(); quitting = true;
+  event.preventDefault(); quitting = true; networkTransfers.close();
   Promise.allSettled([networkProxy?.close(), manager?.close(), uiServer?.close(), saveQueue]).finally(() => { tray?.destroy(); app.quit(); });
 });

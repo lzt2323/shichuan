@@ -75,6 +75,8 @@ try {
   const invitation = await page.evaluate(() => window.pickdrop.createInvite());
   const invitationUrl = new URL(invitation.link);
   assert.equal(invitationUrl.origin, group.baseUrl);
+  assert.notEqual(invitationUrl.hostname, '127.0.0.1');
+  assert.notEqual(invitationUrl.hostname, '0.0.0.0');
   const invitationParams = new URLSearchParams(invitationUrl.hash.slice(1));
   assert.equal(invitationParams.get('group'), group.id);
   assert.match(invitationParams.get('invite'), /^\d{6}$/);
@@ -86,6 +88,28 @@ try {
   assert.ok(await page.locator('.invite-qr').evaluate(image => image.complete && image.naturalWidth > 0));
   await page.screenshot({ path: 'artifacts/mobile-invite-desktop.png', omitBackground: true });
   await page.locator('#close-panel').click();
+  // A user can inspect and explicitly select the real LAN in the smallest UI.
+  await page.locator('#group-menu-button').click();
+  await page.locator('#network-settings').click();
+  await page.locator('#apply-network').waitFor();
+  const network = await page.evaluate(() => window.pickdrop.getNetwork());
+  assert.ok(network.available && network.selected?.address);
+  await page.locator(`input[name="pickdrop-network"][value=${JSON.stringify(network.selected.id)}]`).check();
+  await page.locator('#apply-network').click();
+  await page.waitForFunction(async () => (await window.pickdrop.getNetwork()).selection.mode === 'manual');
+  await page.waitForFunction(() => document.querySelector('#connection-status')?.dataset.connected === 'true');
+  await page.locator('#panel-body').evaluate(node => { node.scrollTop = 0; });
+  await page.screenshot({ path: 'artifacts/desktop-network-settings.png', omitBackground: true });
+  assert.ok(await page.locator('#close-panel').isVisible());
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.locator('input[name="pickdrop-network"][value="auto"]').check();
+  await page.locator('#apply-network').click();
+  await page.waitForFunction(async () => (await window.pickdrop.getNetwork()).selection.mode === 'auto');
+  await page.locator('#close-panel').click();
+  await page.waitForFunction(() => document.querySelector('#connection-status')?.dataset.connected === 'true');
+  await page.locator('#message-input').fill('切换网络后继续传输');
+  await page.locator('#send-text').click();
+  await page.getByText('切换网络后继续传输', { exact: true }).waitFor();
   assert.deepEqual(errors, []);
   await writeFile('artifacts/desktop-visual-smoke.json', JSON.stringify({ realBackendMessages: true, distinctSenders: true, fixtureData: true, menuSurvivesPresenceUpdate: true, keyboardMenuDismissal: true, minimumSizeUsable: true, layout, errors }, null, 2));
   console.log('Desktop visual smoke passed: actual shared conversation, distinct senders, minimum layout, mobile invitation QR, screenshots.');
