@@ -8,19 +8,19 @@
 
 源码仓库：[lzt2323/shichuan](https://github.com/lzt2323/shichuan)。安装包统一从 [GitHub Releases](https://github.com/lzt2323/shichuan/releases) 下载；源码历史不包含安装包和用户数据。开发分支、检查和标签发布约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 0.3.4 全平台内测版
+## 0.3.5 全平台内测版
 
-本版新增 Android 输入框长按粘贴图片：图片和文字位于同一输入框，点击发送才上传。保留 A「拾点」Logo、方向键 Linux TUI、快捷启停命令和保存目录记忆。
+本版修复群连接恢复与附近群发现，新增桌面移除设备及独立设备授权。手机在前台自动发现并恢复已加入群，主机 IP 或端口变化后无需反复扫码。各端请同步升级，旧群首次升级设备授权后需重新批准成员一次，聊天和文件保留。
 
-所有安装包集中在 [v0.3.4 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.3.4)，按系统下载一项即可：
+所有安装包集中在 [v0.3.5 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.3.5)，按系统下载一项即可：
 
 | 系统 | 文件 |
 | --- | --- |
-| Windows x64 | `PickDrop-0.3.4-Windows.exe` |
-| Mac Apple 芯片 | `PickDrop-0.3.4-Mac-AppleSilicon.zip` |
-| Android ARM64 | `PickDrop-0.3.4-Android-arm64-preview.apk` |
-| Linux x64 | `PickDrop-0.3.4-Linux-x64-TUI.tar.gz` |
-| Linux ARM64 | `PickDrop-0.3.4-Linux-arm64-TUI.tar.gz` |
+| Windows x64 | `PickDrop-0.3.5-Windows.exe` |
+| Mac Apple 芯片 | `PickDrop-0.3.5-Mac-AppleSilicon.zip` |
+| Android ARM64 | `PickDrop-0.3.5-Android-arm64-preview.apk` |
+| Linux x64 | `PickDrop-0.3.5-Linux-x64-TUI.tar.gz` |
+| Linux ARM64 | `PickDrop-0.3.5-Linux-arm64-TUI.tar.gz` |
 
 安装包自带运行资源，不需要 Node.js、Expo Go 或开发服务器。Linux 提供终端界面及命令行，可在 SSH 中使用；解压后运行包内 `pickdrop`，详细说明见 [Linux 使用指南](docs/linux.md)。暂不提供 Linux 图形窗口版、Intel Mac 包或 iOS IPA。
 
@@ -51,9 +51,9 @@ Mac 未签名、公证；Android 为使用公开测试证书的「拾传内测�
 
 旧版本机收件箱会非破坏性迁移成「我的传输群」，保留原始数据。旧版远程连接缺少新群标识，升级后需用新邀请码重新加入一次。不要公开含密钥的配置文件。
 
-## 开发分支：连接恢复与设备管理
+## v0.3.5：连接恢复与设备管理
 
-以下行为随源码更新，现有 v0.3.4 安装包不包含这些改动，需要后续发布的新安装包。
+以下改动包含在 v0.3.5 安装包中，v0.3.4 安装包不包含。
 
 - 自动网络跟随物理网卡的 DHCP 地址变化；自动模式不会静默选择 VPN，手动模式仍保持所选网卡。
 - 已加入群在手机前台自动发现、验证主机并恢复连接；桌面附近群列表实时更新。主机优先复用上次群服务端口，端口被占用时可以通过发现更新地址，无需重新扫码。

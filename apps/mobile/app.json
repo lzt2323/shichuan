@@ -2,7 +2,7 @@
   "expo": {
     "name": "拾传",
     "slug": "pickdrop",
-    "version": "0.3.4",
+    "version": "0.3.5",
     "orientation": "portrait",
     "scheme": "pickdrop",
     "userInterfaceStyle": "light",
@@ -25,7 +25,7 @@
         "android.permission.INTERNET",
         "android.permission.CAMERA"
       ],
-      "versionCode": 304,
+      "versionCode": 305,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#126A5A",
