@@ -43,6 +43,7 @@ jobs:
       - name: Build standalone release APK with preview signing
         working-directory: apps/mobile/android
         run: |
+          set -o pipefail
           chmod +x gradlew
           ./gradlew :app:assembleRelease --no-daemon --max-workers=2 -PreactNativeArchitectures=arm64-v8a '-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' 2>&1 | tee "$GITHUB_WORKSPACE/android-build.log"
       - name: Verify APK and package release files

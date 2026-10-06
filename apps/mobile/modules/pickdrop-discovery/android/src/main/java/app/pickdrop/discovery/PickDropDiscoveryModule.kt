@@ -234,8 +234,9 @@ class PickDropDiscoveryModule : Module() {
     Thread {
       var socket: MulticastSocket? = null
       try {
-        val activeSocket = MulticastSocket(null).apply { reuseAddress = true; bind(InetSocketAddress(47320)); soTimeout = 1000; timeToLive = 1 }
-        socket = activeSocket
+        val activeSocket = MulticastSocket(null)
+        socket = activeSocket // Retain ownership before configuration or bind can throw.
+        activeSocket.apply { reuseAddress = true; bind(InetSocketAddress(47320)); soTimeout = 1000; timeToLive = 1 }
         synchronized(udpGuard) { if (session != id) { activeSocket.close(); return@Thread }; udpSocket = activeSocket }
         val cm = connectivity
         val network = cm?.allNetworks?.firstOrNull { val caps = cm?.getNetworkCapabilities(it); caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true || caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true }
