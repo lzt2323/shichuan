@@ -93,6 +93,11 @@ try {
   peerApp = await start(path.join(temp, 'peer'));
   const peerHome = await peerApp.firstWindow(); await connected(peerHome);
   await peerHome.evaluate(() => window.pickdrop.rename('另一台电脑'));
+  // Keep the join panel open before a new host advertisement exists. No manual refresh.
+  await peerHome.locator('#group-menu-button').click(); await peerHome.locator('#join-group').click();
+  const lateGroup = await personal.evaluate(() => window.pickdrop.createGroup('发现刷新回归'));
+  await peerHome.locator(`#nearby-groups option[data-group-id="${lateGroup.id}"]`).waitFor({ state: 'attached', timeout: 15000 });
+  await peerHome.locator('#close-panel').click();
   await work.locator('#group-menu-button').click(); await work.locator('#invite-members').click();
   await work.waitForFunction(() => /^\d{6}$/.test(document.querySelector('#invite-code')?.textContent || ''));
   const code = await work.locator('#invite-code').innerText();
@@ -158,10 +163,40 @@ try {
   await hostRestored.locator('#send-text').click();
   await peerWork.getByText('托管电脑重启后的消息', { exact: true }).waitFor({ timeout: 15000 });
   await peerWork.screenshot({ path: path.join(output, 'mini-group-window.png') });
+  // Removal must revoke the saved token, not merely hide an avatar.
+  const oldPeer = await bootstrap(peerWork);
+  await hostRestored.locator('#members-button').click();
+  await hostRestored.locator(`[data-remove-device="${oldPeer.device.id}"]`).click();
+  await hostRestored.locator('#confirm-operation').click();
+  await hostRestored.waitForFunction(id => !document.querySelector(`[data-remove-device="${id}"]`), oldPeer.device.id);
+  const revoked = await fetch(oldPeer.room.baseUrl + '/api/state', { headers: { 'X-Room-Key': oldPeer.room.key, 'X-Device-Id': oldPeer.device.id } });
+  assert.ok([401, 403].includes(revoked.status), 'Removed device token still accesses group');
+  await peerWork.waitForFunction(() => document.querySelector('#connection-status')?.title.includes('授权已失效'), null, { timeout: 15000 });
+  // An offline/revoked member can forget locally and the native window is destroyed.
+  await peerWork.locator('#members-button').click(); await peerWork.locator('#forget-group').click();
+  const closedPeer = peerWork.waitForEvent('close'); await peerWork.locator('#confirm-operation').click(); await closedPeer;
+  assert.ok(!(await bootstrap(peerHome)).groups.some(group => group.id === oldPeer.room.id));
+  // Rejoin the same identity with a new grant, then explicitly leave online.
+  const reInvite = await hostRestored.evaluate(() => window.pickdrop.createInvite());
+  const reTicket = await peerHome.evaluate(value => window.pickdrop.joinAt(value.baseUrl, value.code, value.groupId), { ...reInvite, groupId: oldPeer.room.id });
+  const reRequests = await hostRestored.evaluate(() => window.pickdrop.listJoinRequests());
+  const requestList = Array.isArray(reRequests) ? reRequests : reRequests.requests;
+  const reRequest = requestList.find(item => item.device.id === oldPeer.device.id);
+  assert.ok(reRequest); await hostRestored.evaluate(id => window.pickdrop.respondJoin(id, true), reRequest.id);
+  await peerHome.evaluate(ticket => window.pickdrop.checkJoin(ticket), reTicket);
+  const rePeer = await pageFor(peerApp, oldPeer.room.id); await connected(rePeer);
+  const reGrant = await bootstrap(rePeer); assert.notEqual(reGrant.room.key, oldPeer.room.key);
+  await rePeer.locator('#members-button').click(); await rePeer.locator('#leave-group').click();
+  const left = rePeer.waitForEvent('close'); await rePeer.locator('#confirm-operation').click(); await left;
+  const leftAccess = await fetch(reGrant.room.baseUrl + '/api/state', { headers: { 'X-Room-Key': reGrant.room.key, 'X-Device-Id': reGrant.device.id } });
+  assert.ok([401, 403].includes(leftAccess.status));
+  assert.ok(!(await bootstrap(peerHome)).groups.some(group => group.id === reGrant.room.id));
+  await assert.rejects(hostRestored.evaluate(() => window.pickdrop.leaveGroup()), /托管电脑/);
+  await assert.rejects(hostRestored.evaluate(() => window.pickdrop.forgetGroup()), /托管电脑/);
   assert.deepEqual(errors, []);
-  const report = { nativeMultiWindow: true, groupIsolation: true, binaryTransfer: true, dropToGroup: true, shortCodeApproval: true, persistentGroups: true, hostRestartDiscovery: true, remoteCacheHashVerified: true, nativeDragIPC: true, edgeTabBounds: true, nonOverlappingTabs: true, pinKeepsExpanded: true, physicalOSDropTested: false, consoleErrors: errors };
+  const report = { nativeMultiWindow: true, liveNearbyRefresh: true, memberTokenRevoked: true, revokedMemberForget: true, onlineLeaveRevokesToken: true, hostLeaveProtected: true, groupIsolation: true, binaryTransfer: true, dropToGroup: true, shortCodeApproval: true, persistentGroups: true, hostRestartDiscovery: true, remoteCacheHashVerified: true, nativeDragIPC: true, edgeTabBounds: true, nonOverlappingTabs: true, pinKeepsExpanded: true, physicalOSDropTested: false, consoleErrors: errors };
   await writeFile(path.join(output, 'desktop-groups-smoke.json'), JSON.stringify(report, null, 2));
-  console.log('Desktop groups smoke passed: two independent apps, independent groups, 6-digit pairing, native file cache/drag IPC, edge tabs and restart recovery.');
+  console.log('Desktop groups smoke passed: independent apps/groups, live nearby discovery, pairing, file drag/cache, restart recovery, member revocation, forget/leave and host protection.');
 } finally {
   if (peerApp) await peerApp.close().catch(() => {});
   if (hostApp) await hostApp.close().catch(() => {});

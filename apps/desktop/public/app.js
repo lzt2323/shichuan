@@ -4,7 +4,8 @@ import { ImageDrafts, createImagePasteHandler } from '/clipboard-images.js';
 const $ = id => document.getElementById(id);
 const bridge = window.pickdrop;
 let config, socket, epoch = 0, reconnectTimer, toastTimer, dropDepth = 0, preparing = 0, uploading = 0;
-let pendingTicket, pendingTimer, requestsLoading = false, groupsLoading = false;
+let requestController = new AbortController(), reconnectAttempt = 0, connectionError = '', nearbyRefresh;
+let pendingTicket, pendingTimer, requestsLoading = false, groupsLoading = false, groupsDirty = false;
 let state = { messages: [], devices: [] }, groups = [], requests = [], online = false, panelKind = '', inviteTimer;
 const ready = new Map(), prepareQueue = [];
 const imageDrafts = new ImageDrafts();
@@ -28,9 +29,9 @@ function groupName() { return config?.room?.name || '我的文件'; }
 function connection(value) { online = value; renderConnection(); }
 function renderConnection() {
   $('connection-status').dataset.connected = String(online);
-  $('connection-status').textContent = online ? `${state.devices.filter(device => device.online).length} 在线` : '连接中';
+  $('connection-status').textContent = online ? `${state.devices.filter(device => device.online).length} 在线` : connectionError ? '连接失败 · 点击查看' : '连接中';
   $('connection-dot').classList.toggle('offline', !online);
-  $('connection-status').title = online ? '已连接，在线状态已同步' : '正在重新连接，在线状态待更新';
+  $('connection-status').title = online ? '已连接，在线状态已同步' : connectionError || '正在重新连接，在线状态待更新';
 }
 function avatar(name, id, className = '') {
   const displayName = (name || '?').trim();
@@ -41,8 +42,8 @@ function avatar(name, id, className = '') {
   node.setAttribute('aria-hidden', 'true'); return node;
 }
 async function api(route, options = {}) {
-  const response = await fetch(config.room.baseUrl + route, { ...options, headers: { 'X-Room-Key': config.room.key, 'X-Device-Id': config.device.id, ...options.headers } });
-  const result = await response.json(); if (!response.ok) throw new Error(result.error || '操作失败'); return result;
+  const response = await fetch(config.room.baseUrl + route, { ...options, signal: AbortSignal.any([requestController.signal, options.signal || AbortSignal.timeout(8000)]), headers: { 'X-Room-Key': config.room.key, 'X-Device-Id': config.device.id, ...options.headers } });
+  const result = await response.json(); if (!response.ok) throw Object.assign(new Error(result.error || '操作失败'), { status: response.status }); return result;
 }
 function time(date) { return new Date(date).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }); }
 function statusFor(message) { return ready.get(message.id) === true ? '可拖出' : ready.get(message.id) === 'error' ? '接收失败' : '接收中'; }
@@ -77,7 +78,12 @@ function renderDevices() {
     const row = element('div', 'device'); row.append(element('div', 'device-avatar', device.kind === 'desktop' ? '▱' : '▯'));
     const details = element('div', 'device-details'); details.append(element('strong', '', device.name + (device.id === config.device.id ? ' · 本机' : '')));
     const status = element('small'); status.append(element('i', `online-dot ${device.online ? '' : 'offline-dot'}`), document.createTextNode(device.online ? '在线' : '离线 · 加入关系已保存'));
-    details.append(status); row.append(details); return row;
+    details.append(status); row.append(details);
+    if (bridge?.removeMember && config.room.local && Number(config.room.authVersion) === 2 && device.id !== config.room.hostDeviceId && device.id !== config.device.id) {
+      const remove = action('移除', () => confirmOperation('移除此设备', `移除「${device.name}」后，其连接和访问授权会被撤销，需要重新申请加入。`, async () => { await bridge.removeMember(device.id); openMembers(); toast('设备已移除，访问授权已撤销'); }), 'secondary-button');
+      remove.dataset.removeDevice = device.id; row.append(remove);
+    }
+    return row;
   }));
 }
 function createMessage(message, animate) {
@@ -228,29 +234,39 @@ function renderMessages() {
 }
 async function saveFile(message) {
   if (bridge) { if (await bridge.saveFile(message.id)) toast('文件已保存'); return; }
-  const response = await fetch(`${config.room.baseUrl}/api/files/${message.id}`, { headers: { 'X-Room-Key': config.room.key } });
+  const response = await fetch(`${config.room.baseUrl}/api/files/${message.id}`, { headers: { 'X-Room-Key': config.room.key, 'X-Device-Id': config.device.id } });
   if (!response.ok) throw new Error('文件下载失败');
   const url = URL.createObjectURL(await response.blob()), anchor = document.createElement('a'); anchor.href = url; anchor.download = message.fileName; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
+function retryConnection(generation, error) {
+  if (generation !== epoch) return;
+  connectionError = error?.message || '群主机未响应，请检查托管电脑、网络和防火墙'; connection(false);
+  if ([401, 403].includes(error?.status)) { connectionError = '此设备的授权已失效，请联系托管电脑重新批准加入'; renderConnection(); return; }
+  const delay = Math.min(30000, 1000 * 2 ** Math.min(reconnectAttempt++, 5)) + Math.floor(Math.random() * 400);
+  reconnectTimer = setTimeout(() => join().catch(showError), delay);
+}
+function cancelConnection(message) {
+  ++epoch; clearTimeout(reconnectTimer); requestController.abort(); socket?.close();
+  connectionError = message; connection(false);
+}
 async function join() {
-  const generation = ++epoch; clearTimeout(reconnectTimer); socket?.close(); ready.clear(); prepareQueue.length = 0; connection(false);
+  const generation = ++epoch; clearTimeout(reconnectTimer); requestController.abort(); requestController = new AbortController(); socket?.close(); ready.clear(); prepareQueue.length = 0; connection(false);
+  if (config.network && (!config.network.available || config.network.switching)) { connectionError = '所选网络已断开或正在切换，请等待连接恢复'; connection(false); return; }
   $('group-name').textContent = groupName(); $('message-input').placeholder = '发文件或说点什么…'; $('drop-label').textContent = `松开，发到「${groupName()}」`; document.title = `${groupName()} · 拾传`;
   renderMessages();
   try {
     await api('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config.device) });
-    const initial = await api('/api/state'); if (generation !== epoch) return; applyState(initial);
-  } catch {
-    if (generation === epoch) { connection(false); reconnectTimer = setTimeout(() => join().catch(showError), 3000); }
-    return;
-  }
-  function connect() {
     if (generation !== epoch) return;
-    const url = new URL('/api/events', config.room.baseUrl); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('key', config.room.key); url.searchParams.set('device', config.device.id);
-    socket = new WebSocket(url); socket.onopen = () => { if (generation === epoch) connection(true); };
-    socket.onmessage = event => { if (generation !== epoch) return; try { const data = JSON.parse(event.data); if (data.type === 'state') applyState(data); } catch {} };
-    socket.onclose = () => { if (generation === epoch) { connection(false); reconnectTimer = setTimeout(connect, 2500); } }; socket.onerror = () => socket.close();
-  }
-  connect();
+    const initial = await api('/api/state'); if (generation !== epoch) return; applyState(initial);
+  } catch (error) { retryConnection(generation, error); return; }
+  if (generation !== epoch) return;
+  const url = new URL('/api/events', config.room.baseUrl); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('key', config.room.key); url.searchParams.set('device', config.device.id);
+  const current = new WebSocket(url); socket = current;
+  const handshake = setTimeout(() => { if (generation === epoch && current.readyState !== WebSocket.OPEN) { connectionError = '实时连接握手超时，请检查网络和托管电脑'; current.close(); } }, 8000);
+  current.onopen = () => { clearTimeout(handshake); if (generation === epoch) { reconnectAttempt = 0; connectionError = ''; connection(true); } else current.close(); };
+  current.onmessage = event => { if (generation !== epoch) return; try { const data = JSON.parse(event.data); if (data.type === 'state') applyState(data); } catch {} };
+  current.onclose = event => { clearTimeout(handshake); if (generation === epoch) retryConnection(generation, Object.assign(new Error(connectionError || '实时连接已断开，正在重新查找群主机'), { status: event.code === 1008 ? 403 : undefined })); };
+  current.onerror = () => { if (generation === epoch) connectionError ||= '无法连接群主机，请检查网络和防火墙'; current.close(); };
 }
 async function sendText() {
   const input = $('message-input'), text = input.value.trim(); if (!text) return true; if ($('send-text').disabled || !config) return false;
@@ -375,10 +391,12 @@ function openJoin() {
   const address = input('可选：对方电脑地址 http://192.168.…', 'join-address'); address.type = 'url';
   const nearby = element('select', 'panel-input'); nearby.id = 'nearby-groups'; nearby.setAttribute('aria-label', '同网络附近的群');
   const populate = async () => {
-    const list = await bridge.listNearby?.() || []; nearby.replaceChildren();
+    const list = await bridge.listNearby?.() || []; if (panelKind !== 'join' || !nearby.isConnected) return;
+    const previous = nearby.value; nearby.replaceChildren();
     const fallback = element('option', '', list.length ? '自动搜索，或选择附近的群' : '暂无附近群，可填写电脑地址'); fallback.value = ''; nearby.append(fallback);
-    for (const item of list) { const option = element('option', '', `${item.name || '附近的群'} · ${item.baseUrl}`); option.value = item.baseUrl; option.dataset.groupId = item.groupId; nearby.append(option); }
+    for (const item of list) { const option = element('option', '', `${item.name || '附近的群'} · ${item.baseUrl}`); option.value = item.baseUrl; option.dataset.groupId = item.groupId; nearby.append(option); if (item.baseUrl === previous) nearby.value = previous; }
   };
+  nearbyRefresh = populate;
   nearby.onchange = () => { address.value = nearby.value; }; address.oninput = () => { nearby.value = ''; };
   body.append(description('输入 6 位邀请码。仅在所选网络寻找对方，也可选择附近群或填写电脑地址。'), code, nearby, address, submit, action('刷新附近的群', populate, 'secondary-button')); populate().catch(() => {}); code.onkeydown = event => { if (event.key === 'Enter' && !event.isComposing) submit.click(); }; code.focus();
 }
@@ -402,6 +420,7 @@ let networkPanelEpoch = 0;
 const networkType = type => ({ wifi: 'Wi-Fi', ethernet: '有线网络', vpn: 'VPN', virtual: '虚拟网卡', unknown: '网络' }[type] || '网络');
 function networkState(next) {
   if (!config) return; config.network = next;
+  if (next && (next.switching || !next.available)) cancelConnection(next.switching ? '正在切换网络，请等待重新连接' : '所选网络已断开，请检查网络设置');
   const label = $('network-offline'), selected = next?.selected;
   label.hidden = !bridge;
   label.classList.toggle('is-offline', !next?.available);
@@ -441,10 +460,27 @@ async function openNetwork() {
   body.append(apply, action('刷新网络列表', openNetwork, 'secondary-button'), description('切换网络会重新连接群。文件正在传输时不能切换；请先完成或取消。'));
 }
 
+function confirmOperation(title, text, callback) {
+  const body = openPanel(title, 'confirm'); body.append(description(text));
+  const submit = action('确认', async () => { submit.disabled = true; try { await callback(); if (panelKind === 'confirm') $('panel').close(); } finally { submit.disabled = false; } }, 'primary-button', 'confirm-operation');
+  body.append(submit, action('取消', openMembers, 'secondary-button'));
+}
+function openConnectionDiagnostic() {
+  const body = openPanel('连接诊断', 'diagnostic');
+  body.append(description(`${connectionError || '当前已连接'}。群：${groupName()}；地址：${config?.room?.baseUrl || '尚未发现'}。`), action('重新连接', async () => { reconnectAttempt = 0; connectionError = ''; $('panel').close(); await join(); }, 'primary-button', 'retry-connection'));
+  if (bridge?.getNetwork) body.append(action('网络连接设置', openNetwork, 'secondary-button'));
+}
 function openMembers() {
   const body = openPanel(`${groupName()} · 设备`, 'members'); body.append(description('离线设备仍保留在本群，重新上线后继续同步。'));
+  if (connectionError) body.append(action('查看连接诊断', openConnectionDiagnostic, 'secondary-button', 'connection-diagnostic'));
   if (bridge?.listJoinRequests) body.append(action(`处理加入申请（${requests.length}）`, openRequests, 'primary-button', 'member-join-requests'));
+  if (config.room.local && Number(config.room.authVersion) !== 2 && bridge?.secureMembers) {
+    body.append(description('此旧群使用共享授权。先升级为每设备授权，才能真正撤销设备访问。升级会使现有设备离线，需要重新申请并批准加入；历史消息与文件保留。'), action('升级设备授权', () => confirmOperation('升级此群授权', '升级后全部现有成员需要重新申请并由托管电脑批准。历史消息与文件保留。确认后才能移除设备并撤销访问。', async () => { const room = await bridge.secureMembers(); if (room?.id === config.room.id) config.room = room; await groupsChanged(); await join(); openMembers(); }), 'secondary-button', 'secure-members'));
+  }
   const devices = element('div'); devices.id = 'devices'; body.append(devices);
+  if (!config.room.local && bridge?.leaveGroup) {
+    body.append(action('退出此群', () => confirmOperation('退出此群', '退出会撤销这台设备的群访问授权，并移除本地加入关系。重新加入需要托管电脑批准。', () => bridge.leaveGroup()), 'secondary-button', 'leave-group'), action('忘记此群', () => confirmOperation('忘记此群', '仅删除本地加入关系，不撤销主机上的授权。主机离线时也可操作；缓存文件保留。需要重新加入时请扫码申请。', () => bridge.forgetGroup()), 'secondary-button', 'forget-group'));
+  } else if (config.room.local) body.append(description('这台电脑托管此群，不能退出或忘记。关闭窗口可继续在托盘中提供服务。'));
   if (bridge?.createInvite) body.append(action('＋ 邀请设备', openInvite, 'primary-button'));
   const settings = element('div', 'device-settings'); const label = element('label', '', '这台设备的名字'); label.htmlFor = 'device-name'; const name = input('设备名称', 'device-name', config.device.name); name.maxLength = 40;
   settings.append(label, name, action('保存设备名称', async () => {
@@ -466,7 +502,7 @@ async function refreshRequests() {
   return requestsLoading;
 }
 async function groupsChanged() {
-  if (groupsLoading) return;
+  if (groupsLoading) { groupsDirty = true; return; }
   groupsLoading = true;
   try {
     const next = await bridge.bootstrap(), room = next.group || next.room;
@@ -475,7 +511,7 @@ async function groupsChanged() {
     if (room.id === config.room.id) { config.room = room; config.device = next.device; }
     await refreshGroups();
     if (reconnect) await join();
-  } finally { groupsLoading = false; }
+  } finally { groupsLoading = false; if (groupsDirty) { groupsDirty = false; void groupsChanged().catch(showError); } }
 }
 function windowState(next) {
   config.window = { ...config.window, ...next }; $('pin-button').setAttribute('aria-pressed', String(Boolean(config.window.pinned))); $('dock-button').setAttribute('aria-pressed', String(Boolean(config.window.edge || config.window.docked)));
@@ -489,12 +525,14 @@ async function boot() {
     config = { device, room: { ...room, local: false, name: '我的文件' }, window: {} };
   }
   document.body.dataset.platform = config.platform || 'web'; windowState(config.window || {}); networkState(config.network);
+  bridge?.onNearbyChanged?.(() => { if (panelKind === 'join') nearbyRefresh?.().catch(showError); });
   bridge?.onNetworkChanged?.(next => { networkState(next); if (panelKind === 'network') openNetwork().catch(showError); });
   bridge?.onGroupsChanged?.(() => groupsChanged().catch(showError)); bridge?.onJoinRequestsChanged?.(() => refreshRequests().catch(showError)); bridge?.onWindowChanged?.(windowState);
   await refreshGroups(); try { await join(); await refreshRequests(); } catch (error) { showError(error); connection(false); }
   // Remote group requests arrive over HTTP; native change events only cover local hosts.
   setInterval(() => { if (document.visibilityState === 'visible' && !config.window?.collapsed) refreshRequests().catch(() => {}); }, 2500);
 }
+$('connection-status').onclick = event => { if (connectionError) { event.stopPropagation(); openConnectionDiagnostic(); } };
 $('group-menu-button').onclick = async () => { if (!config) return; if (!$('group-menu').hidden) { closeMenu(); return; } $('group-menu').hidden = false; $('group-menu-button').setAttribute('aria-expanded', 'true'); busy(); try { await refreshGroups(); } catch (error) { showError(error); } };
 $('network-settings').onclick = () => openNetwork().catch(showError); $('network-offline').onclick = () => openNetwork().catch(showError);
 $('create-group').onclick = openCreate; $('join-group').onclick = openJoin; $('invite-members').onclick = () => openInvite().catch(showError); $('view-members').onclick = openMembers; $('members-button').onclick = () => { if (config) openMembers(); };

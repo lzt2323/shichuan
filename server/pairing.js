@@ -4,8 +4,8 @@ const fail = (status, message) => Object.assign(new Error(message), { status });
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 // Codes and approval tickets deliberately stay in memory and expire on restart.
-// Every registered device with the group key has the same invitation/approval rights.
-export function createGroupPairing({ group, key, registerDevice, now = Date.now, ttl = 300000, onRequestsChanged = () => {} }) {
+// Registered devices retain invitation/approval rights; removal is host-only.
+export function createGroupPairing({ group, key, registerDevice, approveDevice, credentialFor, hasDevice, proofFor, authVersion = () => 1, now = Date.now, ttl = 300000, onRequestsChanged = () => {} }) {
   const invites = new Map(), requests = new Map(), limits = new Map();
   function prune() {
     for (const [code, invite] of invites) if (invite.expiresAt <= now()) invites.delete(code);
@@ -20,9 +20,13 @@ export function createGroupPairing({ group, key, registerDevice, now = Date.now,
   }
   const publicRequest = request => ({ id: request.id, requestId: request.id, device: request.device, createdAt: request.createdAt, expiresAt: request.expiresAt, status: request.expiresAt <= now() ? 'expired' : request.status });
   return {
-    probe(challenge) {
+    probe(challenge, deviceId, requestedVersion) {
       if (typeof challenge !== 'string' || !/^[a-f0-9]{64}$/.test(challenge)) throw fail(400, '验证请求不正确');
-      return { groupId: group.id, hostDeviceId: group.hostDeviceId, proof: createHmac('sha256', key).update(`${group.id}:${challenge}`).digest('hex') };
+      if (authVersion() === 2) {
+        if (requestedVersion !== 2 || !uuid.test(deviceId)) throw fail(401, '请重新申请加入此群');
+        return { groupId: group.id, hostDeviceId: group.hostDeviceId, authVersion: 2, proof: proofFor(deviceId, challenge) };
+      }
+      return { groupId: group.id, hostDeviceId: group.hostDeviceId, authVersion: 1, proof: createHmac('sha256', key).update(`${group.id}:${challenge}`).digest('hex') };
     },
     invite() {
       prune();
@@ -35,6 +39,7 @@ export function createGroupPairing({ group, key, registerDevice, now = Date.now,
     request(code, device, ip) {
       rate(ip);
       if (!uuid.test(device?.id) || typeof device?.name !== 'string' || !device.name.trim()) throw fail(400, '设备信息不正确');
+      if (authVersion() === 2 && hasDevice(device.id)) throw fail(409, '此设备已加入，请使用保存的连接信息');
       const invite = invites.get(code);
       if (!invite || invite.expiresAt <= now()) throw fail(404, '邀请码无效或已过期');
       invites.delete(code); // Reserve exactly once, before waiting for approval.
@@ -47,17 +52,22 @@ export function createGroupPairing({ group, key, registerDevice, now = Date.now,
       const request = requests.get(id);
       if (!request || typeof token !== 'string' || token !== request.pollToken) { rate(ip); throw fail(404, '找不到加入申请'); }
       const status = request.expiresAt <= now() ? 'expired' : request.status === 'approving' ? 'pending' : request.status;
-      return status === 'approved' ? { status, group: { ...group, key } } : { status };
+      if (status === 'approved' && authVersion() === 2 && !credentialFor(request.device.id, request.credential)) return { status: 'revoked' };
+      return status === 'approved' ? { status, group: { ...group, authVersion: authVersion(), key: authVersion() === 2 ? request.credential : key } } : { status };
+    },
+    invalidateDevice(deviceId) {
+      for (const request of requests.values()) if (request.device.id === deviceId) { request.status = 'revoked'; delete request.credential; }
+      onRequestsChanged();
     },
     list() { prune(); return [...requests.values()].filter(r => r.status === 'pending' && r.expiresAt > now()).map(publicRequest); },
-    async respond(id, allow) {
+    async respond(id, allow, actorRequest) {
       const request = requests.get(id);
       if (!request || request.expiresAt <= now()) throw fail(410, '加入申请已过期');
       if (request.status !== 'pending') throw fail(409, '加入申请已处理');
       if (typeof allow !== 'boolean') throw fail(400, '审批结果不正确');
       // Reserve the decision before asynchronous disk I/O to avoid concurrent approval races.
       request.status = allow ? 'approving' : 'denied';
-      try { if (allow) { await registerDevice(request.device); request.status = 'approved'; } }
+      try { if (allow) { request.credential = approveDevice ? await approveDevice(request.device, actorRequest) : (await registerDevice(request.device), key); request.status = 'approved'; } }
       catch (error) { request.status = 'pending'; throw error; }
       onRequestsChanged(); return { status: request.status };
     },

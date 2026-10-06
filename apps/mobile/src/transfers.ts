@@ -8,7 +8,7 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils';
 import { safeFileName } from '../../../shared/protocol';
 import { assertFileMetadata, assertLocalShareUri, byteProgress } from './transfer-utils';
 
-export type TransferGroup = { id: string; name?: string; baseUrl: string; key: string; deviceId: string; maxFileBytes?: number; verify?: () => Promise<void> };
+export type TransferGroup = { id: string; name?: string; baseUrl: string; key: string; deviceId: string; hostDeviceId?: string; authVersion?: 2; maxFileBytes?: number; verify?: () => Promise<void | { baseUrl: string }> };
 export type IncomingAsset = { uri: string; name?: string; mimeType?: string; size?: number };
 export type TransferMessage = { id: string; fileName?: string; size?: number; mime?: string; sha256?: string };
 export type TransferStatus = 'preparing' | 'draft' | 'queued' | 'uploading' | 'downloading' | 'verifying' | 'completed' | 'failed' | 'cancelled';
@@ -18,7 +18,7 @@ export type TransferItem = {
   error?: string; localUri?: string; messageId?: string; mimeType?: string;
 };
 type Task = { item: TransferItem; group: Readonly<TransferGroup>; asset?: IncomingAsset; message?: TransferMessage; cancelled: boolean; native?: { cancelAsync(): Promise<void> }; folder?: string };
-type Manifest = { version: 1; id: string; groupId: string; baseUrl: string; name: string; mimeType?: string; size: number };
+type Manifest = { version: 1 | 2; hostDeviceId?: string; credentialHash?: string; id: string; groupId: string; baseUrl: string; name: string; mimeType?: string; size: number };
 const digestKey = (value: string) => bytesToHex(sha256(utf8ToBytes(value)));
 const yieldToUI = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const errorText = (error: unknown) => error instanceof Error ? error.message : '传输失败，请重试';
@@ -108,7 +108,7 @@ export class TransferManager {
       const info = await FS.getInfoAsync(localUri);
       if (!info.exists || info.isDirectory) throw new Error('文件无法读取，请重新选择');
       if (info.size > (task.group.maxFileBytes ?? 8 * 1024 ** 3)) throw new Error('文件超过当前群的大小上限');
-      const manifest: Manifest = { version: 1, id: task.item.id, groupId: task.group.id, baseUrl: task.group.baseUrl, name: task.item.name, mimeType: task.asset!.mimeType, size: info.size };
+      const manifest: Manifest = { version: 2, hostDeviceId: task.group.hostDeviceId, credentialHash: digestKey('pickdrop-draft-v2:' + task.group.key), id: task.item.id, groupId: task.group.id, baseUrl: task.group.baseUrl, name: task.item.name, mimeType: task.asset!.mimeType, size: info.size };
       await FS.writeAsStringAsync(folder + 'draft.json', JSON.stringify(manifest));
       checkCancelled(task);
       this.update(task, { localUri, size: info.size, status: 'draft', error: undefined });
@@ -118,7 +118,7 @@ export class TransferManager {
     }
   }
 
-  /** Reattach persisted drafts only to the original group and origin. Never resend automatically. */
+  /** Endpoint hints may change; persisted device credentials and host identity must remain the same. */
   async restoreDrafts(groups: TransferGroup[]): Promise<void> {
     const root = directory('drafts');
     await FS.makeDirectoryAsync(root, { intermediates: true });
@@ -126,8 +126,8 @@ export class TransferManager {
       if (this.tasks.has(id) || !/^[a-f0-9-]{36}$/i.test(id)) continue;
       try {
         const saved: Manifest = JSON.parse(await FS.readAsStringAsync(root + id + '/draft.json'));
-        if (saved.version !== 1 || saved.id !== id || saved.name !== safeFileName(saved.name)) continue;
-        const group = groups.find(group => group.id === saved.groupId && new URL(group.baseUrl).origin === saved.baseUrl);
+        if (![1, 2].includes(saved.version) || saved.id !== id || saved.name !== safeFileName(saved.name)) continue;
+        const group = groups.find(group => group.id === saved.groupId && (saved.version === 2 ? group.hostDeviceId === saved.hostDeviceId && (digestKey('pickdrop-draft-v2:' + group.key) === saved.credentialHash || (group.authVersion !== 2 && digestKey(group.key) === saved.credentialHash)) : group.authVersion !== 2 && new URL(group.baseUrl).origin === saved.baseUrl));
         if (!group) continue;
         const localUri = root + id + '/payload/' + saved.name;
         const info = await FS.getInfoAsync(localUri);
@@ -204,7 +204,8 @@ export class TransferManager {
     if (info.size > (task.group.maxFileBytes ?? 8 * 1024 ** 3)) throw new Error('文件超过当前群的大小上限');
     checkCancelled(task);
     this.update(task, { status: 'uploading' });
-    await task.group.verify?.(); checkCancelled(task);
+    const verified = await task.group.verify?.(); checkCancelled(task);
+    if (verified?.baseUrl) task.group = freezeGroup({ ...task.group, baseUrl: verified.baseUrl });
     const native = FS.createUploadTask(`${task.group.baseUrl}/api/files?name=${encodeURIComponent(task.item.name)}`, task.item.localUri, { httpMethod: 'POST', uploadType: FS.FileSystemUploadType.BINARY_CONTENT, sessionType: FS.FileSystemSessionType.FOREGROUND, headers: { 'X-Room-Key': task.group.key, 'X-Device-Id': task.group.deviceId, 'Content-Type': task.asset?.mimeType || 'application/octet-stream' } }, data => this.progress(task, data.totalBytesSent, data.totalBytesExpectedToSend));
     task.native = native;
     const result = await native.uploadAsync(); checkCancelled(task);
@@ -232,7 +233,8 @@ export class TransferManager {
     }
     if (!cached) {
       this.update(task, { status: 'downloading', progress: undefined });
-      await task.group.verify?.(); checkCancelled(task);
+      const verified = await task.group.verify?.(); checkCancelled(task);
+      if (verified?.baseUrl) task.group = freezeGroup({ ...task.group, baseUrl: verified.baseUrl });
       const native = FS.createDownloadResumable(`${task.group.baseUrl}/api/files/${encodeURIComponent(message.id)}`, partial, { headers: { 'X-Room-Key': task.group.key, 'X-Device-Id': task.group.deviceId }, sessionType: FS.FileSystemSessionType.FOREGROUND }, data => this.progress(task, data.totalBytesWritten, data.totalBytesExpectedToWrite));
       task.native = native;
       try {

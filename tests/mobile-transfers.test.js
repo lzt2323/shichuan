@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, promises as nodeFs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createInboxServer } from '../server/index.js';
+import { createMobileClient, createVerifiedTransferGroup } from '../apps/mobile/src/client.js';
 import { createRequire } from 'node:module';
 import { randomUUID, createHash } from 'node:crypto';
 import * as protocol from '../shared/protocol.js';
@@ -29,7 +33,7 @@ function setup() {
     async deleteAsync(uri) { for (const key of files.keys()) if (key === uri || key.startsWith(uri.endsWith('/') ? uri : uri + '/')) files.delete(key); },
     createUploadTask(url, uri, options, callback) {
       uploads.push({ url, uri, options }); let cancel = false;
-      return { async uploadAsync() { callback({ totalBytesSent: 4, totalBytesExpectedToSend: content.length }); if (state.holdUpload) await new Promise(resolve => { state.releaseUpload = resolve; }); if (cancel) return null; return { status: 201, body: JSON.stringify({ id: 'sent', size: files.get(uri).length }) }; }, async cancelAsync() { cancel = true; state.releaseUpload?.(); } };
+      return { async uploadAsync() { callback({ totalBytesSent: 4, totalBytesExpectedToSend: content.length }); if (state.holdUpload) await new Promise(resolve => { state.releaseUpload = resolve; }); if (cancel) return null; if (state.uploadHandler) return state.uploadHandler(url, uri, options, files); return { status: 201, body: JSON.stringify({ id: 'sent', size: files.get(uri).length }) }; }, async cancelAsync() { cancel = true; state.releaseUpload?.(); } };
     },
     createDownloadResumable(url, uri, options, callback) {
       downloads.push({ url, uri, options });
@@ -181,4 +185,42 @@ test('new batch waits behind an existing upload in the same group', async () => 
   await Promise.all([firstBatch, laterBatch]);
   assert.equal(env.uploads.length, 2);
   assert.equal(env.manager.getSnapshot().every(item => item.status === 'completed'), true);
+});
+
+
+test('identity-locked file drafts restore and upload to a verified restarted real host', async t => {
+  const env = setup(), dataDir = await nodeFs.mkdtemp(path.join(os.tmpdir(), 'pickdrop-draft-reconnect-'));
+  const metadata = { id: randomUUID(), name: '文件恢复群', hostDeviceId: randomUUID(), authVersion: 2 };
+  let inbox = await createInboxServer({ dataDir, host: '127.0.0.1', group: metadata });
+  await inbox.ensureHostDevice({ id: metadata.hostDeviceId, name: '主机', kind: 'desktop' });
+  const saved = new Map();
+  const client = createMobileClient({ randomUUID, storage: { getItemAsync: async key => saved.get(key) || null, setItemAsync: async (key, value) => saved.set(key, value) } });
+  t.after(async () => { client.close(); await inbox.close(); await nodeFs.rm(dataDir, { recursive: true, force: true }); });
+  await client.init();
+  const ticket = await client.requestJoin(`${inbox.baseUrl}/#invite=${inbox.pairing.invite().code}&group=${metadata.id}`);
+  await inbox.pairing.respond(ticket.requestId, true);
+  const original = (await client.checkJoin(ticket)).group;
+  const transfer = createVerifiedTransferGroup(client, original, client.device.id);
+  const [id] = await env.manager.importIncoming(transfer, [{ uri: 'content://source', name: 'saved.txt' }]);
+  const manifestUri = [...env.files.keys()].find(uri => uri.endsWith('/draft.json'));
+  const manifest = JSON.parse(env.files.get(manifestUri));
+  assert.notEqual(manifest.credentialHash, createHash('sha256').update(original.key).digest('hex'), 'draft fingerprint must not reveal the host proof secret');
+  const oldUrl = original.baseUrl;
+  await inbox.close(); inbox = await createInboxServer({ dataDir, host: '127.0.0.1', group: metadata });
+  await client.reconnectAt(original.id, inbox.baseUrl);
+  assert.notEqual(inbox.baseUrl, oldUrl);
+  const restored = new env.Manager();
+  await restored.restoreDrafts([createVerifiedTransferGroup(client, client.getGroup(original.id), client.device.id)]);
+  assert.equal(restored.getSnapshot()[0].id, id); assert.deepEqual(env.files.get(restored.getSnapshot()[0].localUri), content);
+  const wrongCredential = new env.Manager(); await wrongCredential.restoreDrafts([{ ...transfer, key: 'b'.repeat(64) }]); assert.equal(wrongCredential.getSnapshot().length, 0);
+  const wrongHost = new env.Manager(); await wrongHost.restoreDrafts([{ ...transfer, hostDeviceId: randomUUID() }]); assert.equal(wrongHost.getSnapshot().length, 0);
+  env.state.uploadHandler = async (url, uri, options, files) => {
+    assert.ok(url.startsWith(inbox.baseUrl));
+    const response = await fetch(url, { method: 'POST', headers: options.headers, body: files.get(uri) });
+    return { status: response.status, body: await response.text() };
+  };
+  // The original queued task also resolves its endpoint immediately before native upload.
+  await env.manager.start(id);
+  assert.equal(env.manager.getSnapshot()[0].status, 'completed');
+  assert.equal(inbox.state().messages[0].fileName, 'saved.txt');
 });

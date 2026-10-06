@@ -164,6 +164,20 @@ function registerIPC() {
   handle('group:join', (_record, code) => manager.joinWithCode(code));
   handle('group:join-at', (_record, address, code, groupId) => manager.joinAt(address, code, groupId));
   handle('group:nearby', () => manager.listNearby());
+  handle('group:remove-member', (record, id) => manager.removeMember(record.groupId, id));
+  handle('group:secure-members', record => manager.secureMembers(record.groupId));
+  const detachGroup = async (record, forget) => {
+    if (groupFor(record).local) throw new Error('托管电脑不能退出或忘记此群；请保留托管服务和文件');
+    await (forget ? manager.forgetGroup(record.groupId) : manager.leaveGroup(record.groupId));
+    let next = manager.listGroups()[0];
+    if (!next) next = await manager.createGroup('我的设备');
+    await openGroup(next.id);
+    record.win.destroy();
+    delete config.windows[record.groupId]; await saveConfig(); updateTray();
+    return true;
+  };
+  handle('group:leave', record => detachGroup(record, false));
+  handle('group:forget', record => detachGroup(record, true));
   handle('network:get', async () => { await manager.refreshNetwork(); return manager.getNetwork(); });
   handle('network:set', async (_record, value) => {
     if (pending.size) throw new Error('有文件正在接收，请完成后再切换网络');
@@ -261,6 +275,7 @@ else app.whenReady().then(async () => {
     manager.events.on('network-changed', value => { networkTransfers.networkChanged(value); if (value.switching || !value.available) networkProxy.disconnect(); broadcast('network:changed', value); });
     manager.events.on('network-error', error => console.warn('Network:', error.message));
     manager.events.on('discovery-error', error => console.warn('Discovery:', error.message));
+    manager.events.on('nearby-changed', () => broadcast('nearby:changed', {}));
     manager.events.on('requests-changed', () => broadcast('requests:changed', {}));
     const trayIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', process.platform === 'darwin' ? 'trayTemplate.png' : 'icon.png'));
     if (process.platform === 'darwin') trayIcon.setTemplateImage(true);

@@ -56,7 +56,7 @@ try {
   await page.locator(`[data-request-id="${second.requestId}"] [data-action="deny-join"]`).click();
   await page.locator(`[data-request-id="${second.requestId}"]`).waitFor({ state: 'detached' });
   assert.equal(await status(second), 'denied');
-  // Approval by another member is reflected without closing/reopening the panel.
+  // Approval through the host API is reflected without closing/reopening the panel.
   await api('/api/pair/respond', { requestId: third.requestId, allow: true });
   await page.getByText('加入申请已全部处理。', { exact: true }).waitFor();
   assert.equal(await page.locator('#join-request-banner').isVisible(), false);

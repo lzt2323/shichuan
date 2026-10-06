@@ -1,9 +1,9 @@
 export type Device = { id: string; name: string; kind: 'desktop' | 'ios' | 'android' | 'web'; online?: boolean };
-export type Group = { id: string; name: string; baseUrl: string; key: string; hostDeviceId?: string; legacy?: boolean };
+export type Group = { id: string; name: string; baseUrl: string; key: string; hostDeviceId?: string; legacy?: boolean; authVersion?: 2; membershipRevoked?: boolean };
 export type Message = { id: string; type: 'text' | 'file'; text?: string; fileName?: string; size?: number; mime?: string; sha256?: string; senderId: string; senderName: string; createdAt: string };
 export type GroupState = { messages: Message[]; devices: Device[]; maxFileBytes?: number; type?: 'state' };
 export type ConnectionStatus = 'connecting' | 'online' | 'offline' | 'paused';
-export type JoinStatus = 'pending' | 'approved' | 'denied' | 'expired';
+export type JoinStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'revoked';
 export type JoinTicket = { status: 'pending'; requestId: string; pollToken: string; groupId: string; groupName: string; hostDeviceId: string; expiresAt: number; baseUrl: string };
 export type JoinRequest = { id: string; requestId: string; device: Device; createdAt: number; expiresAt: number; status: JoinStatus };
 export type Invite = { code: string; expiresAt: number; groupId: string; link: string };
@@ -24,6 +24,8 @@ export type MobileClient = {
   setActiveGroup(id: string | null): Promise<void>;
   removeGroup(id: string): Promise<void>;
   rename(name: string): Promise<Device>;
+  updateDiscovery(records: Array<{ groupId: string; hostDeviceId: string; baseUrl: string }>): void;
+  resolveGroup(id: string, options?: Pick<RequestOptions, 'signal'>): Promise<Group>;
   reconnectAt(id: string, baseUrl: string, options?: Pick<RequestOptions, 'signal'>): Promise<Group>;
   requestJoinAt(baseUrl: string, code: string, options?: Pick<JoinOptions, 'signal'>): Promise<JoinTicket>;
   requestJoin(link: string, options?: Pick<JoinOptions, 'signal'>): Promise<JoinTicket>;
@@ -31,6 +33,8 @@ export type MobileClient = {
   waitForJoin(ticket: JoinTicket, options?: JoinOptions): Promise<Group>;
   joinLink(link: string, options?: JoinOptions): Promise<Group>;
   createInvite(id: string, options?: Pick<RequestOptions, 'signal'>): Promise<Invite>;
+  leaveGroup(id: string, options?: Pick<RequestOptions, 'signal'>): Promise<any>;
+  removeMember(id: string, deviceId: string, options?: Pick<RequestOptions, 'signal'>): Promise<any>;
   listJoinRequests(id: string, options?: Pick<RequestOptions, 'signal'>): Promise<JoinRequest[]>;
   respondJoin(id: string, requestId: string, allow: boolean, options?: Pick<RequestOptions, 'signal'>): Promise<{ status: JoinStatus }>;
   watchGroup(id: string, options?: { onState?: (state: GroupState) => void; onStatus?: (status: ConnectionStatus) => void; onError?: (error: Error) => void; active?: boolean }): GroupWatch;
@@ -38,3 +42,5 @@ export type MobileClient = {
 };
 export function parseInviteLink(value: string): { baseUrl: string; code: string; groupId?: string; legacy: false } | { baseUrl: string; key: string; legacy: true };
 export function createMobileClient(options: { storage: Storage; randomUUID: () => string; deviceName?: string; kind?: Device['kind']; fetchImpl?: typeof fetch; WebSocketImpl?: typeof WebSocket; requestTimeoutMs?: number; reconnectMs?: number }): MobileClient;
+
+export function createVerifiedTransferGroup(client: MobileClient, group: Group, deviceId: string, maxFileBytes?: number): Group & { deviceId: string; maxFileBytes?: number; verify(): Promise<{ baseUrl: string }> };

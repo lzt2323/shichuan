@@ -21,14 +21,22 @@ try {
   await page.waitForFunction(() => document.querySelector('#connection-status')?.dataset.connected === 'true');
   await page.evaluate(() => window.pickdrop.rename('我的电脑'));
   const { group, device } = await page.evaluate(() => window.pickdrop.bootstrap());
+  const credentials = new Map([[device.id, group.key]]);
   async function api(route, sender, options = {}) {
-    const response = await fetch(group.baseUrl + route, { ...options, headers: { 'X-Room-Key': group.key, 'X-Device-Id': sender, ...options.headers } });
+    const response = await fetch(group.baseUrl + route, { ...options, headers: { 'X-Room-Key': credentials.get(sender), 'X-Device-Id': sender, ...options.headers } });
     assert.ok(response.ok, `${route}: ${response.status}`); return response.json();
   }
   async function peer(name) {
     const id = randomUUID();
+    const invite = await api('/api/pair/invite', device.id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const requested = await fetch(group.baseUrl + '/api/pair/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: invite.code, device: { id, name, kind: 'desktop' } }) });
+    assert.equal(requested.status, 202); const ticket = await requested.json();
+    await api('/api/pair/respond', device.id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId: ticket.requestId, allow: true }) });
+    const approved = await (await fetch(group.baseUrl + '/api/pair/status/' + ticket.requestId, { headers: { 'X-Poll-Token': ticket.pollToken } })).json();
+    assert.equal(approved.status, 'approved'); assert.equal(approved.group.authVersion, 2); assert.notEqual(approved.group.key, group.key);
+    credentials.set(id, approved.group.key);
     await api('/api/join', id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, name, kind: 'desktop' }) });
-    const ws = new WebSocket(`${group.baseUrl.replace('http:', 'ws:')}/api/events?key=${group.key}&device=${id}`);
+    const ws = new WebSocket(`${group.baseUrl.replace('http:', 'ws:')}/api/events?key=${credentials.get(id)}&device=${id}`);
     peers.push(ws); await new Promise((resolve, reject) => { ws.once('open', resolve); ws.once('error', reject); }); return id;
   }
   const lin = await peer('小林'), zhou = await peer('小周');

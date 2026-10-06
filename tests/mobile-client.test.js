@@ -21,8 +21,8 @@ async function setup(t, pairingOptions = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pickdrop-mobile-')), inboxes = [], clients = [];
   t.after(async () => { clients.forEach(client => client.close()); await Promise.all(inboxes.map(inbox => inbox.close())); await fs.rm(dir, { recursive: true, force: true }); });
   return {
-    async host(name = '设计小组') {
-      const group = { id: randomUUID(), name, hostDeviceId: randomUUID() };
+    async host(name = '设计小组', authVersion) {
+      const group = { id: randomUUID(), name, hostDeviceId: randomUUID(), ...(authVersion ? { authVersion } : {}) };
       const inbox = await createInboxServer({ dataDir: path.join(dir, group.id), host: '127.0.0.1', group, pairingOptions });
       inboxes.push(inbox); return { inbox, group, baseUrl: `http://127.0.0.1:${inbox.port}` };
     },
@@ -181,4 +181,82 @@ test('approval polling keeps its consumed invitation through temporary network l
   assert.equal(group.id, host.group.id); assert.equal(polls, 2);
   failPoll = true; const another = await mobile.requestJoin(inviteLink(host)), controller = new AbortController();
   await assert.rejects(mobile.waitForJoin(another, { intervalMs: 1, signal: controller.signal, onStatus: () => controller.abort() }), { name: 'AbortError' });
+});
+
+
+test('a saved mobile group reconnects to a restarted real host endpoint without pairing again', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pickdrop-mobile-resolver-'));
+  const metadata = { id: randomUUID(), name: '恢复群', hostDeviceId: randomUUID() };
+  let inbox = await createInboxServer({ dataDir: dir, host: '127.0.0.1', group: metadata });
+  let spoofedOrigin; const errors = [];
+  const mobile = createMobileClient({ storage: memory(), randomUUID, WebSocketImpl: WebSocket, reconnectMs: 20, requestTimeoutMs: 500, fetchImpl: async (url, options) => {
+    if (spoofedOrigin && String(url) === spoofedOrigin + '/api/group/probe') return new Response(JSON.stringify({ error: '设备授权已失效，请重新申请加入' }), { status: 401 });
+    return fetch(url, options);
+  } });
+  t.after(async () => { mobile.close(); await inbox.close(); await fs.rm(dir, { recursive: true, force: true }); });
+  await mobile.init();
+  const group = await pair(mobile, { inbox, group: metadata, baseUrl: inbox.baseUrl });
+  let online = false, lastState;
+  mobile.watchGroup(group.id, { onStatus: status => { online = status === 'online'; }, onState: state => { lastState = state; }, onError: error => errors.push(error) });
+  await until(() => online);
+  const deviceId = mobile.device.id, key = group.key, oldUrl = inbox.baseUrl;
+  await inbox.close(); spoofedOrigin = oldUrl; await until(() => !online);
+  await until(() => errors.some(error => error.phase === 'probe' && error.status === 401));
+  assert.equal(mobile.getGroup(group.id).key, key, 'untrusted probe errors must not erase credentials or stop recovery');
+  inbox = await createInboxServer({ dataDir: dir, host: '127.0.0.1', group: metadata });
+  assert.notEqual(inbox.baseUrl, oldUrl);
+  mobile.updateDiscovery([{ groupId: group.id, hostDeviceId: group.hostDeviceId, baseUrl: inbox.baseUrl }]);
+  await until(() => online && mobile.getGroup(group.id).baseUrl === inbox.baseUrl);
+  assert.equal(mobile.device.id, deviceId); assert.equal(mobile.getGroup(group.id).key, key);
+  await mobile.api(group.id, '/api/messages', { method: 'POST', body: { text: '自动恢复成功' } });
+  await until(() => lastState.messages.some(message => message.text === '自动恢复成功'));
+});
+
+
+test('mobile v2 device credentials survive restart and leaving revokes only the caller', async t => {
+  const env = await setup(t), host = await env.host('安全群', 2), storage = memory();
+  await host.inbox.ensureHostDevice({ id: host.group.hostDeviceId, name: '主机', kind: 'desktop' });
+  const first = await env.mobile(storage), second = await env.mobile();
+  const a = await pair(first, host), b = await pair(second, host);
+  assert.equal(a.authVersion, 2); assert.notEqual(a.key, b.key);
+  const restored = await env.mobile(storage);
+  assert.equal(restored.getGroup(a.id).authVersion, 2);
+  await restored.api(a.id, '/api/state');
+  await assert.rejects(restored.removeMember(a.id, second.device.id), error => error.status === 403);
+  let connectionStatus, revokedError;
+  const watch = restored.watchGroup(a.id, { onStatus: value => { connectionStatus = value; }, onError: error => { revokedError = error; } });
+  await until(() => connectionStatus === 'online');
+  await restored.leaveGroup(a.id);
+  await until(() => revokedError?.status === 401);
+  watch.setActive(false); watch.setActive(true); await pause(50);
+  assert.equal(connectionStatus, 'offline', 'revoked watches must not resume automatic retries on foreground');
+  await assert.rejects(restored.api(a.id, '/api/state'), error => error.status === 401 || error.status === 403);
+  await second.api(b.id, '/api/state');
+  assert.equal(restored.listGroups().length, 1, 'revocation must not silently erase saved groups or drafts');
+});
+
+test('an API request never sends newly paired credentials to an endpoint proved with the old credentials', async t => {
+  const env = await setup(t), host = await env.host(), calls = [];
+  let hold, release, entered;
+  const blocked = new Promise(resolve => { entered = resolve; });
+  const mobile = await env.mobile(memory(), { fetchImpl: async (url, options) => {
+    calls.push({ url: String(url), headers: options.headers });
+    const response = await fetch(url, options);
+    if (hold && String(url) === host.baseUrl + '/api/group/probe') {
+      hold = false; entered(); await new Promise(resolve => { release = resolve; });
+    }
+    return response;
+  } });
+  const original = await pair(mobile, host);
+  const cloneDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pickdrop-credential-race-'));
+  const clone = await createInboxServer({ dataDir: cloneDir, host: '127.0.0.1', group: host.group });
+  t.after(async () => { release?.(); await clone.close(); await fs.rm(cloneDir, { recursive: true, force: true }); });
+  hold = true;
+  const api = mobile.api(original.id, '/api/state');
+  const rejected = assert.rejects(api, error => error.status === 409);
+  await blocked;
+  const updated = await pair(mobile, { inbox: clone, group: host.group, baseUrl: clone.baseUrl });
+  assert.notEqual(updated.key, original.key);
+  release(); await rejected;
+  assert.ok(!calls.some(call => call.url === host.baseUrl + '/api/state' && call.headers['X-Room-Key'] === updated.key));
 });

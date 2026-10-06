@@ -23,7 +23,7 @@ export function restrictServiceAddress(service, address) {
   return service;
 }
 
-export async function createLanDiscovery({ getAnnouncements, onRecord, onError = () => {}, now = Date.now, interfaceAddress, BonjourImpl = Bonjour, udp = true }) {
+export async function createLanDiscovery({ getAnnouncements, onRecord, onChanged = () => {}, onError = () => {}, now = Date.now, interfaceAddress, BonjourImpl = Bonjour, udp = true }) {
   const records = new Map(), published = new Map(), dnsRecords = new Map();
   let closed = false, ready = false, bonjour, browser, socket;
   const remember = record => {
@@ -56,7 +56,11 @@ export async function createLanDiscovery({ getAnnouncements, onRecord, onError =
     }
     // Goodbye packets remove stale entries immediately, while TTL handles crashes.
     const aliveGroups = new Set(all.filter(rr => rr.type === 'TXT').flatMap(rr => parseDiscoveredService({ txt: Object.fromEntries((rr.data || []).map(value => Buffer.from(value).toString()).filter(value => value.includes('=')).map(value => [value.slice(0, value.indexOf('=')), value.slice(value.indexOf('=') + 1)])), port: 1, addresses: ['192.0.2.1'] }).map(record => record.groupId)));
-    if (incoming.some(rr => rr.ttl === 0)) for (const [key, record] of records) if (record.transport === 'mdns' && !aliveGroups.has(record.groupId)) records.delete(key);
+    if (incoming.some(rr => rr.ttl === 0)) {
+      let removed = false;
+      for (const [key, record] of records) if (record.transport === 'mdns' && !aliveGroups.has(record.groupId)) { records.delete(key); removed = true; }
+      if (removed) onChanged();
+    }
   }
   const publish = () => {
     if (!bonjour || closed) return;
@@ -74,10 +78,11 @@ export async function createLanDiscovery({ getAnnouncements, onRecord, onError =
   };
   const announce = () => {
     if (!socket || !ready || closed) return;
-    for (const entry of getAnnouncements()) socket.send(Buffer.from(JSON.stringify({ protocol: 'pickdrop-groups-v1', groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: entry.name, port: entry.port })), PORT, MULTICAST, error => { if (error) onError(error); });
+    for (const entry of getAnnouncements()) socket.send(Buffer.from(JSON.stringify({ protocol: 'pickdrop-groups-v1', groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: entry.name, port: entry.port, directoryPort: entry.directoryPort })), PORT, MULTICAST, error => { if (error) onError(error); });
   };
   const refresh = () => {
     if (closed) return;
+    prune();
     publish(); browser?.update(); announce();
     if (ready) socket.send(Buffer.from('{"protocol":"pickdrop-discover-v1"}'), PORT, MULTICAST, () => {});
   };
@@ -100,7 +105,7 @@ export async function createLanDiscovery({ getAnnouncements, onRecord, onError =
           const entry = JSON.parse(bytes.toString());
           if (entry.protocol === 'pickdrop-discover-v1') { if (now() - lastResponse > 300) { lastResponse = now(); announce(); } return; }
           if (entry.protocol !== 'pickdrop-groups-v1' || !uuid.test(entry.groupId) || !uuid.test(entry.hostDeviceId) || !Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535) return;
-          remember({ groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: String(entry.name || '传输群').slice(0, 40), baseUrl: `http://${sender.address}:${entry.port}`, seenAt: now(), transport: 'udp' });
+          remember({ groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: String(entry.name || '传输群').slice(0, 40), baseUrl: `http://${sender.address}:${entry.port}`, ...(Number.isInteger(entry.directoryPort) && entry.directoryPort > 0 && entry.directoryPort <= 65535 ? { directoryPort: entry.directoryPort } : {}), seenAt: now(), transport: 'udp' });
         } catch { /* Ignore other applications and malformed advertisements. */ }
       });
       socket.on('error', onError);
@@ -111,9 +116,14 @@ export async function createLanDiscovery({ getAnnouncements, onRecord, onError =
     }
   }
   const interval = setInterval(refresh, 5000); interval.unref(); refresh();
+  function prune() {
+    let removed = false;
+    for (const [key, record] of records) if (now() - record.seenAt > (record.transport === 'mdns' ? 35000 : 20000)) { records.delete(key); removed = true; }
+    if (removed) onChanged();
+  }
   return {
     refresh,
-    list() { for (const [key, record] of records) if (now() - record.seenAt > (record.transport === 'mdns' ? 35000 : 20000)) records.delete(key); return [...records.values()]; },
+    list() { prune(); return [...records.values()]; },
     async close() {
       if (closed) return; closed = true; clearInterval(interval); browser?.stop();
       if (bonjour) { await new Promise(resolve => { const timer = setTimeout(resolve, 300); bonjour.unpublishAll(() => { clearTimeout(timer); resolve(); }); }); await new Promise(resolve => bonjour.destroy(resolve)); }

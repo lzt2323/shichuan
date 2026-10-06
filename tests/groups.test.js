@@ -88,8 +88,9 @@ test('groups and device identity survive restart; discovery recovers new address
   const { manager, bus, root } = await setup(t);
   let host = await manager('host'), guest = await manager('guest');
   const group = await host.createGroup('长期群'), hostId = host.device.id, guestId = guest.device.id;
-  await pair(host, guest, group);
-  await api(group, '/api/messages', guestId, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: '重启保留' }) });
+  const guestGroup = await pair(host, guest, group);
+  const sent = await api(guestGroup, '/api/messages', guestId, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: '重启保留' }) });
+  assert.equal(sent.status, 201);
   await host.close();
   assert.equal((await guest.resolveGroup(group.id)).online, false);
   host = await manager('host');
@@ -103,7 +104,7 @@ test('groups and device identity survive restart; discovery recovers new address
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(guest.listGroups()[0].baseUrl, restarted.baseUrl);
   await guest.close(); guest = await manager('guest');
-  assert.equal(guest.device.id, guestId); assert.equal(guest.listGroups()[0].key, group.key);
+  assert.equal(guest.device.id, guestId); assert.equal(guest.listGroups()[0].key, guestGroup.key);
   assert.equal((await guest.resolveGroup(group.id)).online, true);
 });
 

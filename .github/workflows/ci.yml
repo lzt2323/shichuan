@@ -23,3 +23,6 @@ jobs:
       - run: pnpm test
       - run: pnpm mobile:check
       - run: pnpm mobile:export
+  android:
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/android.yml

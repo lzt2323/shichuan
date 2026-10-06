@@ -49,9 +49,9 @@ test('network switching preserves group identity/history and waits for transfers
   const release = manager.acquireTransfer();
   await assert.rejects(manager.setNetwork({ mode: 'manual', id: vpn.id }), /文件正在传输/); release();
   await manager.setNetwork({ mode: 'manual', id: physical.id });
-  const rebound = manager.listGroups()[0]; assert.equal(rebound.id, group.id); assert.equal(rebound.key, group.key); assert.notEqual(rebound.baseUrl, group.baseUrl);
+  const rebound = manager.listGroups()[0]; assert.equal(rebound.id, group.id); assert.equal(rebound.key, group.key); assert.equal(rebound.baseUrl, group.baseUrl);
   assert.equal((await manager.authenticated(group.id, '/api/state')).messages[0].text, '切换后仍在');
-  await assert.rejects(fetch(group.baseUrl + '/api/state'));
+  assert.equal((await fetch(group.baseUrl + '/api/state')).status, 401);
   adapters = [vpn]; await manager.refreshNetwork();
   assert.equal(manager.getNetwork().available, false); assert.equal(manager.getNetwork().selected.name, 'wifi'); assert.equal(manager.listGroups()[0].online, false);
   await assert.rejects(manager.joinAt('http://127.0.0.1:1234', '123456'), /网络已断开/);
