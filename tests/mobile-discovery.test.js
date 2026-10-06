@@ -44,7 +44,7 @@ test('discovery ignores late native events after stop/restart and releases every
   const controller = createDiscoveryController(native, { sessionId: () => String(++session), timeoutMs: 50 });
   await controller.start(); native.emit('onService', { ...record(), sessionId: '1' }); assert.equal(controller.getSnapshot().devices.length, 1);
   const oldCallbacks = native.saved.slice();
-  await controller.start(); assert.deepEqual(native.stops, ['1']); assert.equal(native.count, 3);
+  await controller.start(); assert.deepEqual(native.stops, ['1']); assert.equal(native.count, 4);
   oldCallbacks.find(item => item.event === 'onService').handler({ ...record(), sessionId: '1' }); assert.equal(controller.getSnapshot().devices.length, 0);
   native.emit('onService', { ...record(), sessionId: '2' }); assert.equal(controller.getSnapshot().status, 'ready');
   native.emit('onLost', { sessionId: '2', serviceId: record().serviceId }); assert.equal(controller.getSnapshot().devices.length, 0);

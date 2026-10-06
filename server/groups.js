@@ -2,11 +2,12 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import https from 'node:https';
-import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomUUID, randomBytes, createHmac, createHash, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { createInboxServer } from './index.js';
 import { createLanDiscovery } from './discovery.js';
-import { chooseNetwork, isPublicIPv4, listNetworkInterfaces, publicEndpoint as endpoint } from './network.js';
+import { createDiscoveryDirectory, DIRECTORY_PORT, probeDirectory, scanDirectories } from './discovery-directory.js';
+import { recoverNetwork, chooseNetwork, isPublicIPv4, listNetworkInterfaces, publicEndpoint as endpoint } from './network.js';
 
 const fail = (status, message) => Object.assign(new Error(message), { status });
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -17,7 +18,7 @@ function origin(value) {
   return url.origin;
 }
 
-export async function createGroupManager({ dataDir, device, discoveryFactory = createLanDiscovery, host, pairingOptions = {}, discoveryWaitMs = 600, fetchImpl, monitorIntervalMs = 5000, networkPollMs = 3000, listInterfaces = listNetworkInterfaces } = {}) {
+export async function createGroupManager({ dataDir, device, discoveryFactory = createLanDiscovery, host, pairingOptions = {}, discoveryWaitMs = 600, fetchImpl, monitorIntervalMs = 5000, networkPollMs = 3000, directoryPort = DIRECTORY_PORT, listInterfaces = listNetworkInterfaces } = {}) {
   if (!dataDir || !uuid.test(device?.id)) throw new Error('dataDir and a valid device are required');
   await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
   const statePath = path.join(dataDir, 'groups.json'), groups = new Map(), hosted = new Map(), events = new EventEmitter();
@@ -29,10 +30,11 @@ export async function createGroupManager({ dataDir, device, discoveryFactory = c
   // An explicit host is retained for CLI/test callers. The interactive defaults
   // never listen on all interfaces, and loopback is never a public invitation.
   let explicitHost = host && host !== '0.0.0.0' ? host : null;
-  let selected = explicitHost ? { id: `explicit:${host}`, name: 'explicit', interfaceName: 'explicit', address: host, type: 'unknown', virtual: !isPublicIPv4(host), connected: true } : saved?.network?.selected || chooseNetwork(interfaces, selection);
+  let selected = explicitHost ? { id: `explicit:${host}`, name: 'explicit', interfaceName: 'explicit', address: host, type: 'unknown', virtual: !isPublicIPv4(host), connected: true } : recoverNetwork(interfaces, selection, saved?.network?.selected);
   const available = () => Boolean(selected && (explicitHost || interfaces.some(item => item.name === selected.name && item.address === selected.address)));
   let networkAvailable = available(), switching = false, networkWrites = Promise.resolve();
-  let writeQueue = Promise.resolve(), closed = false, discovery;
+  let writeQueue = Promise.resolve(), closed = false, discovery, directory, directoryScan, directoryAbort, lastDirectoryScan = 0;
+  const directoryRecords = new Map();
   let leasedTransfers = 0;
   const active = new Set(), resolving = new Map();
   const changed = () => events.emit('groups-changed');
@@ -74,42 +76,66 @@ export async function createGroupManager({ dataDir, device, discoveryFactory = c
   }
   async function authenticate(group, baseUrl) {
     const challenge = randomBytes(32).toString('hex');
-    const result = await request(baseUrl, '/api/group/probe', { method: 'POST', body: { challenge } });
-    const expected = createHmac('sha256', group.key).update(`${group.id}:${challenge}`).digest('hex');
-    return result.groupId === group.id && result.hostDeviceId === group.hostDeviceId && typeof result.proof === 'string' && /^[a-f0-9]{64}$/.test(result.proof) && timingSafeEqual(Buffer.from(expected), Buffer.from(result.proof));
+    const result = await request(baseUrl, '/api/group/probe', { method: 'POST', body: { challenge, ...(group.authVersion === 2 ? { deviceId: device.id, authVersion: 2 } : {}) } });
+    const proofKey = group.authVersion === 2 ? createHash('sha256').update(group.key).digest('hex') : group.key;
+    const expected = createHmac('sha256', proofKey).update(`${group.id}:${challenge}`).digest('hex');
+    return (group.authVersion !== 2 || result.authVersion === 2) && result.groupId === group.id && result.hostDeviceId === group.hostDeviceId && typeof result.proof === 'string' && /^[a-f0-9]{64}$/.test(result.proof) && timingSafeEqual(Buffer.from(expected), Buffer.from(result.proof));
   }
   async function useCandidate(group, baseUrl) {
     if (closed || switching || !networkAvailable || group.local || !baseUrl) return false;
     try { if (!await authenticate(group, baseUrl)) return false; } catch { return false; }
-    if (closed || switching || !networkAvailable) return false;
+    if (closed || switching || !networkAvailable || groups.get(group.id) !== group) return false;
     const different = group.baseUrl !== baseUrl || !group.online;
     group.baseUrl = baseUrl; group.online = true;
     if (different) { await persist(); changed(); }
     return true;
   }
   async function startHosted(group) {
-    const inbox = await createInboxServer({ dataDir: path.join(dataDir, 'groups', group.id), host: selected?.address || '127.0.0.1', listen: networkAvailable, group: { id: group.id, name: group.name, hostDeviceId: group.hostDeviceId }, pairingOptions: { ...pairingOptions, onRequestsChanged: () => events.emit('requests-changed', group.id) } });
+    const options = { dataDir: path.join(dataDir, 'groups', group.id), host: selected?.address || '127.0.0.1', listen: networkAvailable, port: group.preferredPort || 0, group: { id: group.id, name: group.name, hostDeviceId: group.hostDeviceId, authVersion: group.authVersion }, pairingOptions: { ...pairingOptions, onRequestsChanged: () => events.emit('requests-changed', group.id) } };
+    let inbox;
+    try { inbox = await createInboxServer(options); }
+    catch (error) { if (error.code !== 'EADDRINUSE' || !options.port) throw error; inbox = await createInboxServer({ ...options, port: 0 }); }
     hosted.set(group.id, inbox);
-    Object.assign(group, { key: inbox.key, baseUrl: inbox.baseUrl || group.baseUrl || null, online: networkAvailable, local: true });
-    try { await inbox.registerDevice(device); }
-    catch (error) { hosted.delete(group.id); await inbox.close(); throw error; }
+    try {
+      const key = await inbox.ensureHostDevice(device);
+      Object.assign(group, { key, authVersion: inbox.getAuthVersion(), baseUrl: inbox.baseUrl || group.baseUrl || null, online: networkAvailable, local: true, ...(inbox.port ? { preferredPort: inbox.port } : {}) });
+    } catch (error) { hosted.delete(group.id); await inbox.close(); throw error; }
+  }
+  const announcements = () => [...hosted].filter(([, inbox]) => inbox.port).map(([id, inbox]) => ({ groupId: id, hostDeviceId: device.id, name: groups.get(id)?.name || '传输群', port: inbox.port, address: selected.address, directoryPort: directory?.port }));
+  function nearbyRecords() {
+    for (const [key, record] of directoryRecords) if (Date.now() - record.seenAt > 20000) directoryRecords.delete(key);
+    return [...(discovery?.list() || []), ...directoryRecords.values()];
+  }
+  function rememberRecord(record) {
+    if (closed || switching || !networkAvailable) return;
+    if (record.transport === 'directory') {
+      if (directoryRecords.size >= 1024) directoryRecords.delete(directoryRecords.keys().next().value);
+      directoryRecords.set(`${record.groupId}:${record.baseUrl}`, record);
+    }
+    events.emit('nearby-changed');
+    const group = groups.get(record.groupId);
+    if (!group || group.local || group.hostDeviceId !== record.hostDeviceId) return;
+        if (!resolving.has(group.id)) {
+      const operation = track((async () => {
+        if (await useCandidate(group, record.baseUrl) && record.directoryPort) {
+          const url = new URL(record.baseUrl); url.port = String(record.directoryPort); group.directoryUrl = url.origin; await persist();
+        }
+      })()); resolving.set(group.id, operation);
+      operation.finally(() => resolving.delete(group.id)).catch(() => {});
+    }
+  }
+  function scanNearbyDirectories() {
+    if (closed || switching || !networkAvailable || directoryScan || Date.now() - lastDirectoryScan < 15000) return directoryScan;
+    lastDirectoryScan = Date.now(); directoryAbort = new AbortController();
+    const operation = scanDirectories(selected, { signal: directoryAbort.signal, onRecord: rememberRecord });
+    directoryScan = operation;
+    operation.catch(error => events.emit('discovery-error', error)).finally(() => { if (directoryScan === operation) directoryScan = null; });
+    return operation;
   }
   async function startDiscovery() {
     if (!networkAvailable) { discovery = { list: () => [], refresh() {}, async close() {} }; return; }
-    discovery = await discoveryFactory({
-      interfaceAddress: selected.address,
-      getAnnouncements: () => [...hosted].filter(([, inbox]) => inbox.port).map(([id, inbox]) => ({ groupId: id, hostDeviceId: device.id, name: groups.get(id)?.name || '传输群', port: inbox.port, address: selected.address })),
-      onRecord: record => {
-        events.emit('nearby-changed');
-        const group = groups.get(record.groupId);
-        if (!group || group.local || group.hostDeviceId !== record.hostDeviceId || switching) return;
-        if (!resolving.has(group.id)) {
-          const operation = track(useCandidate(group, record.baseUrl)); resolving.set(group.id, operation);
-          operation.finally(() => resolving.delete(group.id)).catch(() => {});
-        }
-      },
-      onError: error => events.emit('discovery-error', error),
-    });
+    directory = await createDiscoveryDirectory({ address: selected.address, getAnnouncements: announcements, port: directoryPort, onError: error => events.emit('discovery-error', error) });
+    discovery = await discoveryFactory({ interfaceAddress: selected.address, getAnnouncements: announcements, onRecord: rememberRecord, onChanged: () => events.emit('nearby-changed'), onError: error => events.emit('discovery-error', error) });
   }
   for (const group of saved?.groups || []) {
     if (!uuid.test(group.id) || !uuid.test(group.hostDeviceId) || !/^[a-f0-9]{64}$/.test(group.key)) throw new Error('Invalid saved group');
@@ -126,14 +152,28 @@ export async function createGroupManager({ dataDir, device, discoveryFactory = c
       }
     }
     await persist(); await startDiscovery();
-  } catch (error) { await Promise.allSettled([...hosted.values()].map(inbox => inbox.close())); throw error; }
+  } catch (error) { await directory?.close(); await Promise.allSettled([...hosted.values()].map(inbox => inbox.close())); throw error; }
   async function resolveGroup(groupId) {
     const group = groups.get(groupId); if (!group) throw fail(404, '找不到这个群');
     if (group.local || !networkAvailable || switching) return { ...group, online: group.local ? networkAvailable : false };
-    if (resolving.has(groupId)) await resolving.get(groupId);
-    const candidates = [...new Set([...discovery.list().filter(r => r.groupId === group.id && r.hostDeviceId === group.hostDeviceId).map(r => r.baseUrl), group.baseUrl])];
-    for (const baseUrl of candidates) if (await useCandidate(group, baseUrl)) return { ...group };
-    if (group.online) { group.online = false; changed(); }
+    if (resolving.has(groupId)) { await resolving.get(groupId); return { ...group }; }
+    const operation = track((async () => {
+      const candidates = [...new Set([group.baseUrl, ...nearbyRecords().filter(r => r.groupId === group.id && r.hostDeviceId === group.hostDeviceId).map(r => r.baseUrl)])].filter(Boolean).slice(0, 16);
+      for (const baseUrl of candidates) if (await useCandidate(group, baseUrl)) return;
+      if (group.baseUrl) {
+        const url = new URL(group.directoryUrl || group.baseUrl);
+        const ports = [...new Set([...(group.directoryUrl ? [Number(url.port)] : []), DIRECTORY_PORT, DIRECTORY_PORT + 1, DIRECTORY_PORT + 2, DIRECTORY_PORT + 3])];
+        const records = (await Promise.all(ports.map(port => probeDirectory(url.hostname, { port, localAddress: selected.address })))).flat();
+        for (const record of records.filter(r => r.groupId === group.id && r.hostDeviceId === group.hostDeviceId)) {
+          if (await useCandidate(group, record.baseUrl)) return;
+        }
+      }
+      discovery.refresh();
+      if (group.online && groups.get(groupId) === group) { group.online = false; changed(); }
+      scanNearbyDirectories();
+    })());
+    resolving.set(groupId, operation);
+    try { await operation; } finally { if (resolving.get(groupId) === operation) resolving.delete(groupId); }
     return { ...group };
   }
   async function authenticated(groupId, route, options = {}) {
@@ -143,7 +183,8 @@ export async function createGroupManager({ dataDir, device, discoveryFactory = c
   }
   async function rebind({ force = false } = {}) {
     switching = true; for (const inbox of hosted.values()) inbox.pauseTransfers(); networkChanged();
-    await discovery.close(); await Promise.all([...active]);
+    directoryAbort?.abort(); await directoryScan?.catch(() => {}); directoryRecords.clear();
+    await directory?.close(); directory = null; await discovery.close(); await Promise.allSettled([...active]);
     await Promise.all([...hosted.values()].map(inbox => inbox.close({ force }))); hosted.clear();
     for (const group of groups.values()) { group.online = false; if (group.local) await startHosted(group); }
     await startDiscovery(); switching = false; await persist(); networkChanged();
@@ -152,11 +193,13 @@ export async function createGroupManager({ dataDir, device, discoveryFactory = c
   async function refreshNetwork() {
     if (closed || explicitHost) return networkState();
     return serializedNetwork(async () => {
-      const next = await listInterfaces(), old = JSON.stringify(interfaces); interfaces = next;
+      const next = await listInterfaces(), old = JSON.stringify(interfaces), previous = selected; interfaces = next;
+      selected = recoverNetwork(next, selection, previous);
+      const addressChanged = previous?.address !== selected?.address || previous?.name !== selected?.name;
       const nextAvailable = available();
-      if (networkAvailable !== nextAvailable) {
+      if (networkAvailable !== nextAvailable || addressChanged) {
         networkAvailable = nextAvailable;
-        try { await rebind({ force: !nextAvailable }); }
+        try { await rebind({ force: !nextAvailable || addressChanged }); }
         catch (error) { switching = false; networkAvailable = false; networkChanged(); events.emit('network-error', error); }
       } else if (JSON.stringify(next) !== old) networkChanged();
       return networkState();
@@ -195,20 +238,23 @@ export async function createGroupManager({ dataDir, device, discoveryFactory = c
       return () => { if (!released) { released = true; leasedTransfers--; } };
     },
     listGroups: () => [...groups.values()].map(group => ({ ...group })),
-    listNearby() { discovery.refresh(); return discovery.list().map(record => ({ ...record })); },
+    listNearby() { discovery.refresh(); scanNearbyDirectories();
+      const unique = new Map(); for (const record of nearbyRecords()) unique.set(`${record.groupId}:${record.baseUrl}`, record);
+      return [...unique.values()].map(record => ({ ...record })); },
     publicEndpoint(groupId) {
       const group = groups.get(groupId); if (!group) throw fail(404, '找不到这个群');
       if (group.local) { const inbox = hosted.get(groupId); if (!networkAvailable) throw fail(503, '所选网络已断开'); return endpoint(selected?.address, inbox?.port); }
       const url = new URL(group.baseUrl); if (!isPublicIPv4(url.hostname)) throw fail(503, '群主机尚无可分享的局域网地址'); return url.origin;
     },
-    async createGroup(name) {
+    createGroup(name) { return serializedNetwork(async () => {
+      if (closed) throw fail(503, '服务已关闭');
       if (switching) throw fail(409, '正在切换网络，请稍后再建群');
       if (typeof name !== 'string' || !name.trim()) throw fail(400, '请输入群名称');
-      const group = { id: randomUUID(), name: name.trim().slice(0, 40), local: true, hostDeviceId: device.id };
+      const group = { id: randomUUID(), name: name.trim().slice(0, 40), local: true, hostDeviceId: device.id, authVersion: 2 };
       await startHosted(group); groups.set(group.id, group);
       try { await persist(); } catch (error) { groups.delete(group.id); await hosted.get(group.id).close(); hosted.delete(group.id); throw error; }
       discovery.refresh(); changed(); return { ...group };
-    },
+    }); },
     async joinAt(baseUrl, code, expectedGroupId) {
       if (expectedGroupId !== undefined && !uuid.test(expectedGroupId)) throw fail(400, '邀请中的群编号不正确');
       code = String(code).trim(); if (!/^\d{6}$/.test(code)) throw fail(400, '请输入 6 位数字邀请码');
@@ -222,7 +268,7 @@ export async function createGroupManager({ dataDir, device, discoveryFactory = c
       code = String(code).trim(); if (!/^\d{6}$/.test(code)) throw fail(400, '请输入 6 位数字邀请码');
       if (!networkAvailable) throw fail(503, '所选网络已断开，请先选择网络');
       discovery.refresh(); if (discoveryWaitMs) await sleep(discoveryWaitMs);
-      const candidates = [...new Set([...discovery.list().map(r => r.baseUrl), ...[...hosted.values()].map(inbox => inbox.baseUrl).filter(Boolean)])].slice(0, 128);
+      const candidates = [...new Set([...nearbyRecords().map(r => r.baseUrl), ...[...hosted.values()].map(inbox => inbox.baseUrl).filter(Boolean)])].slice(0, 128);
       let limited = false;
       for (let offset = 0; offset < candidates.length; offset += 8) {
         const results = await Promise.all(candidates.slice(offset, offset + 8).map(async baseUrl => {
@@ -240,7 +286,7 @@ export async function createGroupManager({ dataDir, device, discoveryFactory = c
       const incoming = result.group;
       if (incoming.id !== ticket.groupId || incoming.hostDeviceId !== ticket.hostDeviceId || !uuid.test(incoming.hostDeviceId) || !/^[a-f0-9]{64}$/.test(incoming.key)) throw fail(400, '群信息不正确');
       if (groups.get(incoming.id)?.local) return { status: 'approved', group: { ...groups.get(incoming.id) } };
-      const group = { id: incoming.id, name: incoming.name, hostDeviceId: incoming.hostDeviceId, key: incoming.key, baseUrl: ticket.baseUrl, local: false, online: true };
+      const group = { id: incoming.id, name: incoming.name, hostDeviceId: incoming.hostDeviceId, key: incoming.key, authVersion: incoming.authVersion === 2 ? 2 : 1, baseUrl: ticket.baseUrl, local: false, online: true };
       if (!await authenticate(group, group.baseUrl)) throw fail(401, '群主机身份验证失败');
       const previous = groups.get(group.id); groups.set(group.id, group);
       try { await persist(); } catch (error) { if (previous) groups.set(group.id, previous); else groups.delete(group.id); throw error; }
@@ -262,9 +308,35 @@ export async function createGroupManager({ dataDir, device, discoveryFactory = c
       await Promise.allSettled([...groups.keys()].map(groupId => authenticated(groupId, '/api/join', { method: 'POST', body: device })));
       changed(); return { ...device };
     },
+    secureMembers(groupId) { return serializedNetwork(async () => {
+      if (closed) throw fail(503, '服务已关闭');
+      const group = groups.get(groupId), inbox = hosted.get(groupId);
+      if (!group || !inbox || !group.local) throw fail(403, '只有群主机可以升级群凭据');
+      const secured = await inbox.secureMembers();
+      Object.assign(group, secured);
+      try { await persist(); } catch { throw fail(500, '群授权已升级，但本机保存失败；请重新打开群或重启恢复'); } finally { changed(); }
+      return { ...group };
+    }); },
+    removeMember(groupId, deviceId) {
+      if (!uuid.test(deviceId)) throw fail(400, '设备编号不正确');
+      return authenticated(groupId, '/api/members/remove', { method: 'POST', body: { deviceId } });
+    },
+    async leaveGroup(groupId) {
+      const group = groups.get(groupId); if (!group) throw fail(404, '找不到这个群');
+      if (group.local) throw fail(409, '群主机不能退出托管的群');
+      await authenticated(groupId, '/api/members/leave', { method: 'POST', body: {} });
+      return manager.forgetGroup(groupId);
+    },
+    async forgetGroup(groupId) {
+      const group = groups.get(groupId); if (!group) throw fail(404, '找不到这个群');
+      if (group.local) throw fail(409, '群主机不能忘记托管的群');
+      groups.delete(groupId);
+      try { await persist(); } catch (error) { groups.set(groupId, group); throw error; }
+      changed(); return { id: groupId };
+    },
     getHostedInbox: groupId => hosted.get(groupId) || null,
     async close() {
-      if (closed) return; closed = true; clearInterval(monitor); clearInterval(networkMonitor); await networkWrites.catch(() => {}); await discovery.close();
+      if (closed) return; closed = true; clearInterval(monitor); clearInterval(networkMonitor); await networkWrites.catch(() => {}); directoryAbort?.abort(); await directoryScan?.catch(() => {}); await directory?.close(); await discovery.close();
       await Promise.allSettled([...active]);
       await Promise.all([...hosted.values()].map(inbox => inbox.close())); await writeQueue;
     },

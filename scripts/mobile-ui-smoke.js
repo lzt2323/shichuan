@@ -52,10 +52,16 @@ async function join(group, manual = false) {
 try {
   const first = await manager.createGroup('项目传输群'), second = await manager.createGroup('家里的传输群');
   const phonePeer = { id: randomUUID(), name: '小林', kind: 'android' };
-  await api(first, '/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(phonePeer) });
-  const peer = new WebSocket(`${first.baseUrl.replace('http:', 'ws:')}/api/events?key=${first.key}&device=${phonePeer.id}`); peers.push(peer);
+  const peerInvite = await manager.createInvite(first.id);
+  const peerRequest = await fetch(first.baseUrl + '/api/pair/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: peerInvite.code, device: phonePeer }) });
+  const peerTicket = await peerRequest.json(); assert.ok(peerRequest.ok);
+  await manager.respondJoin(first.id, peerTicket.requestId, true);
+  const peerApprovalResponse = await fetch(`${first.baseUrl}/api/pair/status/${peerTicket.requestId}`, { headers: { 'X-Poll-Token': peerTicket.pollToken } });
+  const peerApproval = await peerApprovalResponse.json(); assert.equal(peerApproval.status, 'approved');
+  const peerKey = peerApproval.group.key;
+  const peer = new WebSocket(`${first.baseUrl.replace('http:', 'ws:')}/api/events?key=${peerKey}&device=${phonePeer.id}`); peers.push(peer);
   await new Promise((resolve, reject) => { peer.once('open', resolve); peer.once('error', reject); });
-  await api(first, '/api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Device-Id': phonePeer.id }, body: JSON.stringify({ text: '最新的资料放这里，手机上也能收。' }) });
+  await api(first, '/api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Device-Id': phonePeer.id, 'X-Room-Key': peerKey }, body: JSON.stringify({ text: '最新的资料放这里，手机上也能收。' }) });
   await api(first, '/api/files?name=' + encodeURIComponent('项目说明.pdf'), { method: 'POST', headers: { 'Content-Type': 'application/pdf' }, body: Buffer.from('%PDF-1.4\n% mobile UI fixture\n') });
   await api(first, '/api/files?name=' + encodeURIComponent('设计资源.zip'), { method: 'POST', body: Buffer.from('504b0506000000000000000000000000000000000000', 'hex') });
   await page.goto(process.env.PICKDROP_MOBILE_WEB_URL || 'http://localhost:8082');

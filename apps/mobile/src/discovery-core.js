@@ -25,10 +25,10 @@ export function assertDiscoveredTicket(group, ticket) {
 
 /** Owns one native scan. Session IDs reject delayed resolution after stop/restart. */
 export function createDiscoveryController(adapter, { timeoutMs = 8000, sessionId = () => `${Date.now()}-${Math.random()}` } = {}) {
-  let active = null, timer, subscriptions = [], snapshot = { status: adapter ? 'idle' : 'unavailable', devices: [], message: '' };
-  const records = new Map(), listeners = new Set();
+  let active = null, timer, networkTimer, expiryTimer, subscriptions = [], snapshot = { status: adapter ? 'idle' : 'unavailable', devices: [], message: '' };
+  const records = new Map(), lastSeen = new Map(), listeners = new Set();
   const emit = patch => { snapshot = { ...snapshot, ...patch }; for (const listener of listeners) listener(snapshot); };
-  const clear = () => { clearTimeout(timer); subscriptions.forEach(item => item.remove()); subscriptions = []; };
+  const clear = () => { clearTimeout(timer); clearTimeout(networkTimer); clearInterval(expiryTimer); subscriptions.forEach(item => item.remove()); subscriptions = []; };
   const stop = () => { const id = active; active = null; clear(); if (id) Promise.resolve(adapter.stop(id)).catch(() => {}); };
   const armEmptyTimer = () => {
     clearTimeout(timer); const id = active;
@@ -40,17 +40,23 @@ export function createDiscoveryController(adapter, { timeoutMs = 8000, sessionId
     emit({ devices, status: devices.length ? 'ready' : 'scanning', message: '' });
     if (devices.length) clearTimeout(timer); else armEmptyTimer();
   };
-  return {
+  const controller = {
     getSnapshot: () => snapshot,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     async start() {
-      stop(); records.clear();
+      stop(); records.clear(); lastSeen.clear();
       if (!adapter) { emit({ status: 'unavailable', devices: [], message: '附近发现需要安装拾传手机客户端；浏览器和 Expo Go 可使用扫码或高级连接。' }); return; }
       const id = sessionId(); active = id; emit({ status: 'scanning', devices: [], message: '' });
       const listen = (event, callback) => subscriptions.push(adapter.addListener(event, value => { if (active === id && value.sessionId === id) callback(value); }));
-      listen('onService', value => { const group = normalizeService(value); if (group && (records.has(group.serviceId) || records.size < 100)) { records.set(group.serviceId, group); publishDevices(); } });
+      listen('onService', value => { const group = normalizeService(value); if (group && (records.has(group.serviceId) || records.size < 100)) { records.set(group.serviceId, group); lastSeen.set(group.serviceId, Date.now()); publishDevices(); } });
+      listen('onNetworkChanged', () => { clearTimeout(networkTimer); networkTimer = setTimeout(() => { if (active === id) controller.start(); }, 500); });
       listen('onLost', value => { records.delete(value.serviceId); publishDevices(); });
       listen('onState', value => { if (['error', 'permission-denied'].includes(value.state)) { emit({ status: value.state, message: value.message || '附近发现暂不可用，请重试' }); clearTimeout(timer); } });
+      expiryTimer = setInterval(() => {
+        let changed = false;
+        for (const [key, time] of lastSeen) if (key.startsWith('udp:') && Date.now() - time > 20000) { lastSeen.delete(key); records.delete(key); changed = true; }
+        if (changed) publishDevices();
+      }, 5000);
       armEmptyTimer();
       try { await adapter.start(id); }
       catch (error) { if (active === id && snapshot.status !== 'permission-denied') emit({ status: 'error', message: error?.message || '无法查找附近设备，请检查网络后重试' }); }
@@ -58,4 +64,5 @@ export function createDiscoveryController(adapter, { timeoutMs = 8000, sessionId
     stop() { stop(); emit({ status: adapter ? 'idle' : 'unavailable', devices: [] }); },
     dispose() { stop(); listeners.clear(); },
   };
+  return controller;
 }

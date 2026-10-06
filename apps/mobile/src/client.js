@@ -30,7 +30,7 @@ export function parseInviteLink(value) {
 }
 function validateGroup(group) {
   if (!UUID.test(group?.id) || !KEY.test(group?.key) || typeof group.name !== 'string' || !group.name.trim() || (!group.legacy && !UUID.test(group.hostDeviceId))) throw failure('保存的群信息不完整，请重新配对');
-  return { id: group.id, name: group.name.slice(0, 40), key: group.key, baseUrl: baseAddress(group.baseUrl).origin, ...(group.hostDeviceId ? { hostDeviceId: group.hostDeviceId } : {}), ...(group.legacy ? { legacy: true } : {}) };
+  return { id: group.id, name: group.name.slice(0, 40), key: group.key, baseUrl: baseAddress(group.baseUrl).origin, ...(group.hostDeviceId ? { hostDeviceId: group.hostDeviceId } : {}), ...(group.legacy ? { legacy: true } : {}), ...(group.authVersion === 2 ? { authVersion: 2 } : {}), ...(group.membershipRevoked ? { membershipRevoked: true } : {}) };
 }
 function delay(ms, signal) {
   checkAbort(signal);
@@ -44,6 +44,8 @@ function delay(ms, signal) {
 export function createMobileClient({ storage, randomUUID, deviceName = '我的手机', kind = 'ios', fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, requestTimeoutMs = 10000, reconnectMs = 1500 }) {
   let session, initialize, writes = Promise.resolve();
   const watches = new Set();
+  let discovered = [];
+
   const snapshot = () => ({ ...session, device: { ...session.device }, groups: session.groups.map(group => ({ ...group })) });
   async function persist(next) {
     // Each credential is a small SecureStore value; a growing history is never
@@ -56,13 +58,13 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
     const work = writes.catch(() => {}).then(async () => { await client.init(); return operation(); });
     writes = work; return work;
   };
-  async function request(baseUrl, route, { method = 'GET', body, headers = {}, signal } = {}) {
+  async function request(baseUrl, route, { method = 'GET', body, headers = {}, signal, timeoutMs = requestTimeoutMs } = {}) {
     checkAbort(signal);
     const controller = new AbortController();
     let timedOut = false;
     const abort = () => controller.abort();
     signal?.addEventListener('abort', abort, { once: true });
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, requestTimeoutMs);
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
     try {
       const response = await fetchImpl(baseUrl + route, { method, redirect: 'error', headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal });
       let data;
@@ -78,11 +80,13 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
   }
   async function authenticate(group, signal) {
     const challenge = (randomUUID() + randomUUID()).replace(/-/g, '');
-    const info = await request(group.baseUrl, '/api/group/probe', { method: 'POST', body: { challenge }, signal });
-    const expected = bytesToHex(hmac(sha256, utf8ToBytes(group.key), utf8ToBytes(`${info.groupId}:${challenge}`)));
+    let info;
+    try { info = await request(group.baseUrl, '/api/group/probe', { method: 'POST', body: { challenge, ...(group.authVersion === 2 ? { deviceId: client.device.id, authVersion: 2 } : {}) }, signal }); } catch (error) { error.phase = 'probe'; throw error; }
+    const proofKey = group.authVersion === 2 ? bytesToHex(sha256(utf8ToBytes(group.key))) : group.key;
+    const expected = bytesToHex(hmac(sha256, utf8ToBytes(proofKey), utf8ToBytes(`${info.groupId}:${challenge}`)));
     // No room key is sent before the server proves possession. A saved LAN
     // address may now belong to a different machine after network changes.
-    if (!UUID.test(info.groupId) || !UUID.test(info.hostDeviceId) || (!group.legacy && info.groupId !== group.id) || (group.hostDeviceId && info.hostDeviceId !== group.hostDeviceId) || info.proof !== expected) throw failure('电脑身份校验失败，请重新扫描该群邀请二维码', 401);
+    if ((group.authVersion === 2 && info.authVersion !== 2) || !UUID.test(info.groupId) || !UUID.test(info.hostDeviceId) || (!group.legacy && info.groupId !== group.id) || (group.hostDeviceId && info.hostDeviceId !== group.hostDeviceId) || info.proof !== expected) throw Object.assign(failure('群主机身份校验失败，正在继续定位原主机；请确认电脑已打开拾传', 401), { phase: 'probe' });
     return info;
   }
   async function remember(group, signal) {
@@ -138,8 +142,12 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
     async api(id, route, options = {}) {
       if (!route.startsWith('/api/') || route.startsWith('//') || route.includes('#')) throw failure('请求地址不正确');
       const group = client.getGroup(id);
+      const deviceId = client.device.id;
       await authenticate(group, options.signal);
-      return request(group.baseUrl, route, { ...options, headers: { ...options.headers, ...client.authHeaders(id) } });
+      const currentGroup = client.getGroup(id);
+      if (currentGroup.key !== group.key || currentGroup.baseUrl !== group.baseUrl || currentGroup.hostDeviceId !== group.hostDeviceId) throw failure('群连接正在更新，请重试', 409);
+      try { return await request(group.baseUrl, route, { ...options, headers: { ...options.headers, 'X-Room-Key': group.key, 'X-Device-Id': deviceId } }); }
+      catch (error) { error.phase = 'authenticated-api'; error.authenticatedKey = group.key; throw error; }
     },
     setActiveGroup(id) { return mutate(async () => { if (id !== null) client.getGroup(id); await persist({ ...session, activeGroupId: id }); }); },
     removeGroup(id) { return mutate(async () => {
@@ -155,6 +163,34 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
       await Promise.allSettled(session.groups.map(group => client.api(group.id, '/api/join', { method: 'POST', body: device })));
       return { ...device };
     }); },
+    updateDiscovery(records) {
+      discovered = Array.isArray(records) ? records.slice(0, 100) : [];
+      for (const watch of watches) watch.refresh();
+    },
+    async resolveGroup(id, { signal } = {}) {
+      const group = client.getGroup(id);
+      let hints = discovered;
+      try {
+        const directory = new URL(group.baseUrl);
+        for (const port of [47321, 47322, 47323, 47324]) {
+          directory.port = String(port);
+          try {
+            const result = await request(directory.origin, '/api/discovery/groups', { signal, timeoutMs: 450 });
+            if (result.protocol !== 'pickdrop-directory-v1' || !Array.isArray(result.groups)) continue;
+            hints = [...result.groups.slice(0, 100).filter(item => item && Number.isInteger(item.port) && item.port > 0 && item.port <= 65535).map(item => ({ ...item, baseUrl: `${directory.protocol}//${directory.hostname}:${item.port}` })), ...hints];
+            break;
+          } catch (error) { if (signal?.aborted) throw error; }
+        }
+      } catch (error) { if (signal?.aborted) throw error; }
+      const candidates = [...new Set(hints.filter(item => item && item.groupId === group.id && (!group.hostDeviceId || item.hostDeviceId === group.hostDeviceId)).map(item => item.baseUrl))];
+      for (const baseUrl of candidates) {
+        checkAbort(signal);
+        if (baseUrl === group.baseUrl) continue;
+        try { return await client.reconnectAt(id, baseUrl, { signal }); }
+        catch (error) { if (signal?.aborted) throw error; }
+      }
+      return client.getGroup(id);
+    },
     reconnectAt(id, baseUrl, options = {}) { return mutate(async () => {
       const existing = client.getGroup(id);
       const candidate = validateGroup({ ...existing, baseUrl: baseAddress(baseUrl).origin });
@@ -181,7 +217,7 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
       checkAbort(signal);
       if (ticket.expiresAt <= Date.now()) return { status: 'expired' };
       const result = await request(baseAddress(ticket.baseUrl).origin, `/api/pair/status/${ticket.requestId}`, { headers: { 'X-Poll-Token': ticket.pollToken }, signal });
-      if (!['pending', 'approved', 'denied', 'expired'].includes(result.status)) throw failure('加入申请返回了未知状态');
+      if (!['pending', 'approved', 'denied', 'expired', 'revoked'].includes(result.status)) throw failure('加入申请返回了未知状态');
       if (result.status !== 'approved') return result;
       if (result.group?.id !== ticket.groupId || result.group?.hostDeviceId !== ticket.hostDeviceId) throw failure('批准的群与邀请不匹配');
       const group = validateGroup({ ...result.group, baseUrl: ticket.baseUrl });
@@ -203,6 +239,7 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
         }
         onStatus?.(result.status);
         if (result.status === 'approved') return result.group;
+        if (result.status === 'revoked') throw failure('设备授权已失效，请重新申请加入', 401);
         if (result.status === 'denied') throw failure('加入申请被拒绝，请联系群内成员后重新邀请', 403);
         if (result.status === 'expired') throw failure('加入申请已过期，请重新获取邀请链接', 410);
         await delay(intervalMs, signal);
@@ -232,18 +269,22 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
       const invite = await client.api(id, '/api/pair/invite', { ...options, method: 'POST', body: {} });
       return { ...invite, groupId, link: `${group.baseUrl}/#invite=${invite.code}&group=${groupId}` };
     },
+    markRevoked(id, expectedKey) { return mutate(async () => { if (client.getGroup(id).key !== expectedKey) return; const groups = session.groups.map(group => group.id === id ? { ...group, membershipRevoked: true } : group); await persist({ ...session, groups }); }); },
+    leaveGroup(id, options = {}) { return client.api(id, '/api/members/leave', { ...options, method: 'POST', body: {} }); },
+    removeMember(id, deviceId, options = {}) { return client.api(id, '/api/members/remove', { ...options, method: 'POST', body: { deviceId } }); },
     listJoinRequests(id, options = {}) { return client.api(id, '/api/pair/requests', options); },
     respondJoin(id, requestId, allow, options = {}) { return client.api(id, '/api/pair/respond', { ...options, method: 'POST', body: { requestId, allow } }); },
     watchGroup(id, { onState, onStatus, onError, active = true } = {}) {
-      client.getGroup(id);
-      let closed = false, enabled = active, generation = 0, socket, timer, handshakeTimer, controller, attempts = 0;
+      const initialGroup = client.getGroup(id);
+      let closed = false, enabled = active && !initialGroup.membershipRevoked, generation = 0, socket, timer, handshakeTimer, controller, attempts = 0, connecting = false, connectedUrl, lastHints = '', revoked = Boolean(initialGroup.membershipRevoked);
       const current = epoch => !closed && enabled && epoch === generation;
       function stop() {
-        generation++; clearTimeout(timer); clearTimeout(handshakeTimer); controller?.abort(); controller = null;
+        generation++; connectedUrl = null; connecting = false; clearTimeout(timer); clearTimeout(handshakeTimer); controller?.abort(); controller = null;
         if (socket) { socket.onopen = socket.onclose = socket.onmessage = null; socket.onerror = () => {}; socket.close(); socket = null; }
       }
       function retry(epoch, error) {
         if (!current(epoch)) return;
+        connectedUrl = null;
         if (error) onError?.(error);
         onStatus?.('offline');
         clearTimeout(timer); timer = setTimeout(connect, Math.min(15000, reconnectMs * 2 ** Math.min(attempts++, 4)));
@@ -251,7 +292,10 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
       async function connect() {
         stop(); if (closed || !enabled) return;
         const epoch = generation; controller = new AbortController(); onStatus?.('connecting');
+        connecting = true;
         try {
+          await client.resolveGroup(id, { signal: controller.signal });
+          if (!current(epoch)) return;
           await client.api(id, '/api/join', { method: 'POST', body: client.device, signal: controller.signal });
           if (!current(epoch)) return;
           const state = await client.api(id, '/api/state', { signal: controller.signal });
@@ -266,16 +310,40 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
             pending.onerror = () => {}; pending.close();
             retry(epoch, failure('实时连接超时，正在重新连接', 408));
           }, requestTimeoutMs);
-          socket.onopen = () => { if (current(epoch)) { clearTimeout(handshakeTimer); attempts = 0; onStatus?.('online'); } };
-          socket.onmessage = event => { if (!current(epoch)) return; try { const data = JSON.parse(String(event.data)); if (data.type === 'state') onState?.(data); } catch { onError?.(failure('收到无法读取的群消息')); } };
+          socket.onopen = () => { if (current(epoch)) { clearTimeout(handshakeTimer); attempts = 0; connectedUrl = group.baseUrl; onStatus?.('online'); } };
+          socket.onmessage = event => { if (!current(epoch)) return; try { const data = JSON.parse(String(event.data)); if (data.type === 'revoked') { void client.markRevoked(id, group.key).catch(() => {}); revoked = true; enabled = false; stop(); onStatus?.('offline'); onError?.(failure('已退出或被移除，请重新申请加入；待发草稿仍保留', 401)); return; } if (data.type === 'state') onState?.(data); } catch { onError?.(failure('收到无法读取的群消息')); } };
           socket.onclose = () => { clearTimeout(handshakeTimer); retry(epoch); };
           socket.onerror = () => { if (current(epoch)) socket?.close(); };
-        } catch (error) { if (current(epoch)) retry(epoch, error); }
+        } catch (error) { if (current(epoch)) { if (error.status === 401 && error.phase === 'authenticated-api') { void client.markRevoked(id, error.authenticatedKey).catch(() => {}); revoked = true; enabled = false; stop(); onStatus?.('offline'); onError?.(error); } else retry(epoch, error); } } finally { if (current(epoch)) connecting = false; }
       }
-      const watch = { groupId: id, setActive(value) { if (closed || enabled === Boolean(value)) return; enabled = Boolean(value); if (enabled) connect(); else { stop(); onStatus?.('paused'); } }, close() { if (closed) return; closed = true; stop(); watches.delete(watch); } };
-      watches.add(watch); if (enabled) connect(); else onStatus?.('paused'); return watch;
+      const watch = { groupId: id, refresh() {
+        if (closed || !enabled || connecting || connectedUrl) return;
+        const group = client.getGroup(id);
+        const hints = discovered.filter(item => item.groupId === group.id && item.hostDeviceId === group.hostDeviceId).map(item => item.baseUrl).sort().join(',');
+        if (hints === lastHints) return; lastHints = hints;
+        if (discovered.some(item => item.groupId === group.id && item.hostDeviceId === group.hostDeviceId && item.baseUrl !== group.baseUrl) || (!connectedUrl && attempts > 0)) connect();
+      }, setActive(value) { if (closed || revoked || enabled === Boolean(value)) return; enabled = Boolean(value); if (enabled) connect(); else { stop(); onStatus?.('paused'); } }, close() { if (closed) return; closed = true; stop(); watches.delete(watch); } };
+      watches.add(watch); if (enabled) connect(); else if (revoked) { onStatus?.('offline'); onError?.(failure('设备授权已失效，请重新申请加入；待发草稿仍保留', 401)); } else onStatus?.('paused'); return watch;
     },
     close() { for (const watch of [...watches]) watch.close(); },
   };
   return client;
+}
+
+
+/** The recipient is an identity, not an IP. A queued file may use a new verified endpoint. */
+export function createVerifiedTransferGroup(client, group, deviceId, maxFileBytes) {
+  const locked = { ...group };
+  return { ...locked, deviceId, maxFileBytes, verify: async () => {
+    const sameIdentity = () => {
+      const current = client.getGroup(locked.id);
+      if (current.id !== locked.id || current.hostDeviceId !== locked.hostDeviceId || current.key !== locked.key) throw failure('群设备授权已更新，原草稿不能使用新的授权发送', 409);
+      return current;
+    };
+    const before = sameIdentity();
+    await client.verifyGroup(locked.id);
+    const after = sameIdentity();
+    if (before.baseUrl !== after.baseUrl) throw failure('群地址正在更新，请重试发送', 409);
+    return { baseUrl: after.baseUrl };
+  } };
 }

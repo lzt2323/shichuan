@@ -42,10 +42,18 @@ export async function listNetworkInterfaces() {
 }
 export function chooseNetwork(interfaces, selection = { mode: 'auto' }) {
   if (!selection || !['auto', 'manual'].includes(selection.mode)) throw Object.assign(new Error('请选择自动或指定网络'), { status: 400 });
-  if (selection.mode === 'auto') return interfaces.find(item => !item.virtual) || interfaces[0] || null;
+  if (selection.mode === 'auto') return interfaces.find(item => !item.virtual) || null;
   const found = interfaces.find(item => (selection.id ? item.id === selection.id : item.name === (selection.interfaceName || selection.name) && item.address === selection.address));
   if (!found) throw Object.assign(new Error('所选网卡或 IP 已断开，请刷新网络列表'), { status: 409 });
   return found;
+}
+// Keep the user's physical adapter when DHCP updates its address. Automatic
+// recovery may move to another physical link, but never silently onto a VPN.
+export function recoverNetwork(interfaces, selection, previous) {
+  if (selection?.mode === 'manual') return interfaces.find(item => item.name === (selection.interfaceName || selection.name) && item.address === selection.address) || previous || null;
+  return interfaces.find(item => !item.virtual && item.name === previous?.name && item.address === previous?.address)
+    || interfaces.find(item => !item.virtual && item.name === previous?.name)
+    || chooseNetwork(interfaces, { mode: 'auto' });
 }
 export function publicEndpoint(address, port) {
   if (!isPublicIPv4(address) || !Number.isInteger(port) || port < 1 || port > 65535) throw Object.assign(new Error('当前没有可分享的局域网地址，请选择已连接的网络'), { status: 503 });

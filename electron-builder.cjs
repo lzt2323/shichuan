@@ -9,5 +9,5 @@ module.exports = {
   asar: true,
   win: { target: [{ target: 'portable', arch: ['x64'] }], icon: 'apps/desktop/assets/icon.png', signExecutable: false },
   portable: { artifactName: `PickDrop-${version}-Windows.exe`, requestExecutionLevel: 'user' },
-  mac: { target: 'dir', identity: null, icon: 'apps/desktop/assets/icon.png', category: 'public.app-category.utilities' },
+  mac: { target: 'dir', identity: null, icon: 'apps/desktop/assets/icon.png', category: 'public.app-category.utilities', extendInfo: { NSLocalNetworkUsageDescription: '拾传需要发现并连接同一网络中的设备和传输群，以同步消息和传送文件。', NSBonjourServices: ['_pickdrop._tcp'] } },
 };
