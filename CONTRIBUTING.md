@@ -32,6 +32,8 @@ git push origin v0.3.0
 
 当前全平台工作流统一标记为预发布：桌面包未进行正式开发者签名或 macOS 公证，Windows 与手机真机检查仍需单独完成。不上传应用商店。未来正式发布前须补齐签名和实机验收。
 
+Mac 内测构建必须使用完整的 ad-hoc 签名（`mac.identity: '-'`），不能设为 `null` 后保留 Electron 的链接器签名。归档前执行 `codesign --verify --deep --strict`，Mac 发布任务还须运行打包后应用的 smoke 测试。ad-hoc 签名不等于 Developer ID 签名或 Apple 公证，互联网下载后的首次打开仍可能需要用户在「隐私与安全性」中确认。
+
 如果工作流失败，在 Actions 中查看错误；源码有修复时应递增版本并创建新标签。重跑同一标签只可补齐失败流程，已经存在的 Release 资产不会被覆盖。仓库管理员可在 GitHub Rulesets 中为 main 启用 PR 审查和 `checks` 必须通过；本次没有擅自调整管理员权限设置。
 
 ## Android 内测 APK
