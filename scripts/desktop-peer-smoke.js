@@ -4,13 +4,19 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const root = fileURLToPath(new URL('../', import.meta.url));
+const executablePath = process.env.PICKDROP_TEST_EXECUTABLE || createRequire(import.meta.url)('electron');
+const packaged = Boolean(process.env.PICKDROP_TEST_EXECUTABLE);
 
 const dir = await mkdtemp(path.join(tmpdir(), 'pickdrop-peer-desktop-'));
 const apps = [], errors = [];
 const connected = page => page.waitForFunction(() => document.querySelector('#connection-status')?.dataset.connected === 'true', null, { timeout: 20000 });
 const bootstrap = page => page.evaluate(() => window.pickdrop.bootstrap());
 async function start(name) {
-  const app = await electron.launch({ args: ['.'], env: { ...process.env, PICKDROP_TEST_LEGACY_GROUPS: '0', PICKDROP_USER_DATA: path.join(dir, name) } });
+  const app = await electron.launch({ executablePath, args: packaged ? [] : [root], cwd: root, env: { ...process.env, PICKDROP_TEST_LEGACY_GROUPS: '0', PICKDROP_USER_DATA: path.join(dir, name) } });
   apps.push(app);
   const page = await app.firstWindow();
   page.on('pageerror', error => errors.push(error.message));
@@ -41,6 +47,13 @@ try {
   await send(owner.page, '三台设备同步');
   await bGroup.getByText('三台设备同步', { exact: true }).waitFor({ timeout: 20000 });
   await cGroup.getByText('三台设备同步', { exact: true }).waitFor({ timeout: 20000 });
+  // Establish the two survivors through the real manual-address path. Hosted CI
+  // does not promise multicast loopback; strict LAN discovery remains covered by
+  // desktop:smoke, not silently skipped here. No server or renderer mocks.
+  const bEndpoint = (await bootstrap(bGroup)).room.baseUrl;
+  const cEndpoint = (await bootstrap(cGroup)).room.baseUrl;
+  await bGroup.evaluate(address => window.pickdrop.reconnectGroup(address), cEndpoint);
+  await cGroup.evaluate(address => window.pickdrop.reconnectGroup(address), bEndpoint);
   await owner.app.close(); apps.splice(apps.indexOf(owner.app), 1);
   await send(bGroup, '创建电脑退出后继续发送');
   await cGroup.getByText('创建电脑退出后继续发送', { exact: true }).waitFor({ timeout: 20000 });
