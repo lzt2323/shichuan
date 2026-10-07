@@ -36,7 +36,11 @@ git push origin v0.3.0
 
 ## Android 内测 APK
 
-`Android APK` 是可复用构建工作流；可手动运行，或由统一 Release 工作流在 codex 分支预检。它使用 JDK 17、Android SDK 36 和 Expo 生成原生工程，执行 `assembleRelease`，校验 APK 后上传 Actions artifact。它不再单独创建 Android Release；发布标签触发的统一工作流收集该 APK，与其他平台放在同一 Release。
+Android APK 默认通过 GitHub Actions 构建，无需在开发电脑配置 Android SDK。日常测试在仓库 Actions → Android APK → Run workflow 中选择分支；成功后下载 `installer-android` artifact 内的 APK。Pull Request 和 main 更新也会自动构建 Android，main 构建为后续任务更新 Gradle 共享缓存。独立 Android 构建不会创建 Release。
+
+`Android APK` 是可复用工作流，使用 JDK 17、Android SDK 36 和 Expo 生成原生工程，执行 ARM64 `assembleRelease`，校验签名、包名、内置 JS 和不可调试属性，再上传 APK。pnpm 与 Gradle 缓存减少重复下载和编译；Android 任务跳过无关的 Electron 二进制下载。缓存命中不会跳过代码检查或测试。
+
+全平台预检可手动运行 `PickDrop Unified Release`，不再因每次推送 codex 分支重复构建所有平台。发布仍须通过 PR 合并，推送对应版本标签后，由统一工作流构建并发布全部平台；手动预检只上传 artifacts。日常 APK 测试无需创建版本标签。
 
 此流程只构建 ARM64 内测版。`PICKDROP_ANDROID_PREVIEW=1` 启用独立应用名称和包名 `app.pickdrop.mobile.preview`；release 构建内置 Hermes 资源，但使用 Expo 公开测试证书，不能作为正式发布者身份保证。正式版保留 `app.pickdrop.mobile`，必须另行配置私有签名。每次发布需要递增手机版本以及 `apps/mobile/app.config.js` 中的 Android versionCode；不要用同一版本标签发布不同内容。IPA 不在此工作流范围内。
 

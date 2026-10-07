@@ -368,3 +368,139 @@ test('retry of an old save failure queues behind a new receive of the same file'
   assert.equal(env.manager.getSnapshot().find(item => item.id === next).status, 'completed');
   assert.equal(env.downloads.length, 1);
 });
+
+// Received filenames and cache bookkeeping must occupy separate namespaces.
+test('cache.json and .partial-* user payloads survive export, cache sweeping, and retry', async () => {
+  const env = setup();
+  for (const name of ['cache.json', '.partial-user-photo.png', 'payload']) {
+    const file = { ...message, id: name, fileName: name };
+    const id = await env.manager.receive(group(), file);
+    const item = await settle(env.manager, id);
+    assert.equal(item.status, 'completed');
+    assert.ok(item.localUri.endsWith('/payload/' + name));
+    assert.deepEqual(env.files.get(item.localUri), content);
+    await env.manager.cleanCache();
+    assert.deepEqual(env.files.get(item.localUri), content);
+    const again = await env.manager.receive(group(), file, 'share');
+    assert.equal((await settle(env.manager, again)).status, 'completed');
+    assert.deepEqual(env.files.get(env.shared.at(-1)), content);
+  }
+  assert.equal(env.downloads.length, 3, 'repeat exports reuse verified payloads');
+});
+
+test('legacy cache.json collision is ignored and freshly verified bytes are exported', async () => {
+  const env = setup();
+  const file = { ...message, fileName: 'cache.json' };
+  const host = createHash('sha256').update(group().id + '\n' + group().baseUrl).digest('hex');
+  const id = createHash('sha256').update(file.id).digest('hex');
+  const folder = `file:///cache/PickDrop/received/${host}/${id}/`;
+  env.files.set(folder + 'cache.json', Buffer.from(JSON.stringify({ size: content.length, touched: Date.now() })));
+  const saved = await env.manager.receive(group(), file);
+  assert.equal((await settle(env.manager, saved)).status, 'completed');
+  assert.equal(env.downloads.length, 1);
+  assert.deepEqual(env.files.get(env.state.exported[0].uri), content);
+});
+
+test('different files queue native save and share panels and waiting saves are cancellable', async () => {
+  const env = setup(); let finish;
+  env.state.saveHandler = () => new Promise(resolve => { finish = resolve; });
+  const first = await env.manager.receive(group(), { ...message, id: 'first' });
+  for (let tick = 0; tick < 100 && !finish; tick++) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(typeof finish, 'function');
+  const second = await env.manager.receive(group(), { ...message, id: 'second' });
+  const third = await env.manager.receive(group(), { ...message, id: 'third' }, 'share');
+  for (let tick = 0; tick < 100 && !env.manager.getSnapshot().find(item => item.id === third).localUri; tick++) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(env.state.exported.length, 1);
+  assert.equal(env.shared.length, 0);
+  await env.manager.cancel(second);
+  await env.manager.cleanCache(true);
+  const firstUri = env.manager.getSnapshot().find(item => item.id === first).localUri;
+  assert.deepEqual(env.files.get(firstUri), content);
+  finish({ saved: true, destination: '文件' });
+  assert.equal((await settle(env.manager, third)).status, 'completed');
+  assert.equal(env.state.exported.length, 1, 'cancelled waiting panel must never open');
+  assert.equal(env.shared.length, 1);
+  assert.equal(env.manager.getSnapshot().find(item => item.id === second).status, 'cancelled');
+});
+
+test('image preview verifies local bytes without exporting, holds display lease, and reuses save cache', async () => {
+  const env = setup();
+  const image = { ...message, fileName: 'photo.png', mime: 'image/png' };
+  const preview = await env.manager.previewImage(group(), image);
+  assert.ok(preview.uri.startsWith('file:///cache/'));
+  assert.equal(preview.uri.includes(group().key), false);
+  assert.deepEqual(env.files.get(preview.uri), content);
+  assert.equal(env.shared.length, 0); assert.equal(env.state.exported.length, 0);
+  assert.deepEqual(env.manager.getSnapshot(), [], 'background previews do not appear as saved transfers');
+  await env.manager.cleanCache(true);
+  assert.deepEqual(env.files.get(preview.uri), content, 'displayed preview owns a cache lease');
+  const saved = await env.manager.receive(group(), image);
+  assert.equal((await settle(env.manager, saved)).status, 'completed');
+  assert.equal(env.downloads.length, 1);
+  preview.release(); preview.release();
+  await env.manager.cleanCache(true);
+  assert.equal(env.files.has(preview.uri), false);
+});
+
+test('preview rejects corrupt bytes, unsupported formats and oversized originals without export', async () => {
+  const env = setup(), image = { ...message, mime: 'image/png' };
+  await assert.rejects(env.manager.previewImage(group(), { ...image, size: 8 * 1024 * 1024 + 1 }), /不支持预览/);
+  await assert.rejects(env.manager.previewImage(group(), { ...image, mime: 'image/svg+xml' }), /不支持预览/);
+  assert.equal(env.downloads.length, 0);
+  env.state.corrupt = true;
+  await assert.rejects(env.manager.previewImage(group(), image), /文件内容不完整/);
+  assert.equal(env.state.exported.length, 0); assert.equal(env.shared.length, 0);
+  assert.equal([...env.files.keys()].some(key => key.includes('.partial-')), false);
+  env.state.corrupt = false;
+  const preview = await env.manager.previewImage(group(), image);
+  assert.deepEqual(env.files.get(preview.uri), content); preview.release();
+});
+
+test('preview abort cancels active and queued work and releases completed display leases', async () => {
+  const env = setup(), image = { ...message, mime: 'image/png' };
+  let unblock;
+  env.state.downloadHandler = () => new Promise(resolve => { unblock = resolve; });
+  const firstController = new AbortController(), secondController = new AbortController();
+  const first = env.manager.previewImage(group(), image, firstController.signal);
+  const firstRejected = assert.rejects(first, /已取消/);
+  for (let tick = 0; tick < 100 && !unblock; tick++) await new Promise(resolve => setTimeout(resolve, 1));
+  const second = env.manager.previewImage(group(), { ...image, id: 'next-image' }, secondController.signal);
+  const secondRejected = assert.rejects(second, /已取消/);
+  secondController.abort(); firstController.abort(); unblock();
+  await Promise.all([firstRejected, secondRejected]);
+  assert.equal(env.downloads.length, 1, 'queued cancelled previews never start a request');
+  assert.equal([...env.files.keys()].some(key => key.includes('.partial-')), false);
+  env.state.downloadHandler = undefined;
+  const controller = new AbortController();
+  const preview = await env.manager.previewImage(group(), image, controller.signal);
+  controller.abort(); await env.manager.cleanCache(true);
+  assert.equal(env.files.has(preview.uri), false);
+});
+
+test('legacy flat cache is verified and moved without duplicated bytes or redownload', async () => {
+  const env = setup();
+  const host = createHash('sha256').update(group().id + '\n' + group().baseUrl).digest('hex');
+  const id = createHash('sha256').update(message.id).digest('hex');
+  const folder = `file:///cache/PickDrop/received/${host}/${id}/`;
+  env.files.set(folder + message.fileName, content);
+  env.files.set(folder + 'cache.json', Buffer.from(JSON.stringify({ size: content.length, touched: Date.now() })));
+  const saved = await env.manager.receive(group(), message);
+  assert.equal((await settle(env.manager, saved)).status, 'completed');
+  assert.equal(env.downloads.length, 0);
+  assert.equal(env.files.has(folder + message.fileName), false);
+  assert.deepEqual(env.files.get(env.state.exported[0].uri), content);
+});
+
+test('explicit save waits for the same-file preview verification and reuses its bytes', async () => {
+  const env = setup(), image = { ...message, mime: 'image/png' }; let unblock;
+  env.state.downloadHandler = () => new Promise(resolve => { unblock = resolve; });
+  const previewing = env.manager.previewImage(group(), image);
+  for (let tick = 0; tick < 100 && !unblock; tick++) await new Promise(resolve => setTimeout(resolve, 1));
+  const id = await env.manager.receive(group(), image);
+  await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(env.downloads.length, 1); assert.equal(env.state.exported.length, 0);
+  unblock(); const preview = await previewing;
+  assert.equal((await settle(env.manager, id)).status, 'completed');
+  assert.equal(env.downloads.length, 1); assert.equal(env.state.exported.length, 1);
+  preview.release();
+});

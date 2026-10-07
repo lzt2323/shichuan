@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { _electron as electron } from 'playwright';
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -45,11 +45,28 @@ try {
   const file = (sender, name, bytes, mime) => api('/api/files?name=' + encodeURIComponent(name), sender, { method: 'POST', headers: { 'Content-Type': mime }, body: bytes });
   await file(lin, '项目说明.pdf', Buffer.from('%PDF-1.4\n% PickDrop visual test fixture\n'), 'application/pdf');
   await text(zhou, '最新素材放这里了');
-  await file(zhou, '封面.png', Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWZkAAAAASUVORK5CYII=', 'base64'), 'image/png');
+  await file(zhou, '封面.png', await readFile('apps/desktop/assets/icon.png'), 'image/png');
   await file(device.id, '设计资源.zip', Buffer.from('504b0506000000000000000000000000000000000000', 'hex'), 'application/zip');
   await text(device.id, '收到，直接拖走就行');
   await page.locator('.file-bubble[draggable=true]').first().waitFor();
   await page.getByText('收到，直接拖走就行', { exact: true }).waitFor();
+  await mkdir('artifacts', { recursive: true });
+  await app.evaluate(({ BrowserWindow }) => {
+    const win = BrowserWindow.getAllWindows().find(w => w.getTitle() === '项目传输群 · 拾传'); win.setBounds({ width: 420, height: 620 });
+  });
+  const thumbnail = page.locator('.file-thumbnail');
+  await thumbnail.locator('img').waitFor();
+  await thumbnail.evaluate(node => node.closest('.file-bubble').scrollIntoView({ block: 'center' }));
+  await pause(250);
+  await page.screenshot({ animations: 'disabled', path: 'artifacts/desktop-image-preview-card.png', omitBackground: true });
+  await thumbnail.click();
+  await page.locator('.image-preview-full').waitFor();
+  assert.ok(await page.locator('.image-preview-full').evaluate(img => img.src.startsWith('data:image/png;')));
+  await page.screenshot({ animations: 'disabled', path: 'artifacts/desktop-image-preview-full.png', omitBackground: true });
+  await page.keyboard.press('Escape');
+  await page.locator('#panel').waitFor({ state: 'hidden' });
+  await page.locator('.image-preview-full').waitFor({ state: 'detached' });
+  assert.equal(await page.locator('.image-preview-full').count(), 0);
   await pause(250);
   await mkdir('artifacts', { recursive: true });
   await page.screenshot({ animations:'disabled', path: 'artifacts/group-transfer-desktop.png', omitBackground: true });

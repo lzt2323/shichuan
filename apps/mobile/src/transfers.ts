@@ -20,6 +20,9 @@ export type TransferItem = {
 };
 type Task = { item: TransferItem; group: Readonly<TransferGroup>; asset?: IncomingAsset; message?: TransferMessage; cancelled: boolean; native?: { cancelAsync(): Promise<void> }; folder?: string };
 type Manifest = { version: 1 | 2; hostDeviceId?: string; credentialHash?: string; id: string; groupId: string; baseUrl: string; name: string; mimeType?: string; size: number };
+// Native save/share panels are process-wide and only accept one presentation at a time.
+let presentationTail: Promise<void> = Promise.resolve();
+export const MAX_IMAGE_PREVIEW_BYTES = 8 * 1024 * 1024;
 const digestKey = (value: string) => bytesToHex(sha256(utf8ToBytes(value)));
 const yieldToUI = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const errorText = (error: unknown) => error instanceof Error ? error.message : '传输失败，请重试';
@@ -67,6 +70,7 @@ export class TransferManager {
   private picking = false;
   private downloadLeases = new Map<string, number>();
   private downloadTails = new Map<string, Promise<void>>();
+  private previewTail: Promise<void> = Promise.resolve();
   private cacheSweep: Promise<void> = Promise.resolve();
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   getSnapshot = () => this.snapshot;
@@ -74,7 +78,7 @@ export class TransferManager {
     const finished = [...this.tasks.values()].filter(task => ['completed', 'save-cancelled'].includes(task.item.status) || (task.item.direction === 'download' && ['failed', 'cancelled'].includes(task.item.status)));
     for (const task of finished.slice(0, Math.max(0, finished.length - 100))) this.tasks.delete(task.item.id);
     this.snapshot = [...this.tasks.values()].map(task => ({ ...task.item })); this.listeners.forEach(listener => listener()); }
-  private update(task: Task, patch: Partial<TransferItem>) { task.item = { ...task.item, ...patch }; this.emit(); }
+  private update(task: Task, patch: Partial<TransferItem>) { task.item = { ...task.item, ...patch }; if (this.tasks.has(task.item.id)) this.emit(); }
   private progress(task: Task, bytes: number, total: number) { if (!task.cancelled) this.update(task, byteProgress(bytes, total)); }
 
   async pickFiles(group: TransferGroup): Promise<string[]> {
@@ -253,6 +257,44 @@ export class TransferManager {
     const task: Task = { group: locked, message: { ...message }, cancelled: false, item: { id, groupId: locked.id, groupName: locked.name || '传输群', messageId: message.id, direction: 'download', action, mimeType: message.mime, name: safeFileName(message.fileName), size: message.size!, status: 'draft', bytesTransferred: 0 } };
     this.tasks.set(id, task); this.emit(); void this.start(id); return id;
   }
+  /** Returns only a verified local file. The caller must release the displayed image on unmount. */
+  async previewImage(group: TransferGroup, message: TransferMessage, signal?: AbortSignal): Promise<{ uri: string; release: () => void }> {
+    const locked = freezeGroup(group); assertFileMetadata(message);
+    if (!/^image\/(jpeg|png|webp)$/i.test(message.mime || '') || message.size! > MAX_IMAGE_PREVIEW_BYTES) throw new Error('此图片暂不支持预览，请保存后查看');
+    const task: Task = { group: locked, message: { ...message }, cancelled: false, item: { id: randomUUID(), groupId: locked.id, groupName: locked.name || '传输群', messageId: message.id, direction: 'download', name: safeFileName(message.fileName), size: message.size!, status: 'queued', bytesTransferred: 0 } };
+    let released = false, leased = false;
+    const release = () => {
+      if (released) return; released = true;
+      signal?.removeEventListener('abort', abort);
+      if (leased && task.folder) { this.releaseLease(task.folder); void this.cleanCache().catch(() => {}); }
+    };
+    const abort = () => { task.cancelled = true; void task.native?.cancelAsync().catch(() => {}); release(); };
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    // One background preview download at a time, sharing the per-file lock with explicit saves.
+    const operation = this.previewTail.catch(() => {}).then(async () => {
+      checkCancelled(task);
+      const key = locked.id + '\n' + (locked.hostDeviceId || locked.baseUrl) + '\n' + message.id;
+      const previous = this.downloadTails.get(key) || Promise.resolve();
+      const downloading = previous.catch(() => {}).then(async () => {
+        checkCancelled(task); await this.download(task, true); leased = true;
+      });
+      this.downloadTails.set(key, downloading);
+      try { await downloading; }
+      finally { if (this.downloadTails.get(key) === downloading) this.downloadTails.delete(key); }
+      // Abort may arrive in the microtask after download acquired the display lease.
+      if (released) { this.releaseLease(task.folder!); leased = false; }
+      checkCancelled(task);
+      return { uri: task.item.localUri!, release };
+    });
+    this.previewTail = operation.then(() => {}, () => {});
+    try { return await operation; }
+    catch (error) { release(); throw error; }
+  }
+  private releaseLease(folder: string) {
+    const remaining = (this.downloadLeases.get(folder) || 1) - 1;
+    if (remaining > 0) this.downloadLeases.set(folder, remaining); else this.downloadLeases.delete(folder);
+  }
   async downloadAndShare(group: TransferGroup, message: TransferMessage) { return this.receive(group, message, 'share'); }
   async reassignDraft(id: string, group: TransferGroup) {
     const task = this.tasks.get(id); if (!task?.item.localUri || !['orphaned', 'draft', 'failed', 'cancelled'].includes(task.item.status) || task.item.direction !== 'upload') throw new Error('这个草稿暂时无法重新关联');
@@ -293,7 +335,7 @@ export class TransferManager {
     // Completed uploads must not retain large staged payloads or reappear as unsent drafts.
     if (task.folder) { await deleteQuietly(task.folder + 'draft.json'); await deleteQuietly(task.folder); }
   }
-  private async download(task: Task) {
+  private async download(task: Task, preview = false) {
     const message = task.message!;
     const folder = `${directory('received')}${digestKey(task.group.id + '\n' + (task.group.hostDeviceId || task.group.baseUrl))}/${digestKey(message.id)}/`;
     while (true) {
@@ -303,9 +345,28 @@ export class TransferManager {
     checkCancelled(task); this.downloadLeases.set(folder, (this.downloadLeases.get(folder) || 0) + 1);
     try {
       await FS.makeDirectoryAsync(folder, { intermediates: true }); task.folder = folder;
-      const target = folder + task.item.name, partial = folder + '.partial-' + task.item.id;
+      // User filenames never share the metadata namespace (notably cache.json).
+      // An old flat cache could contain a file literally named payload; refetch
+      // that cache entry so the directory can be created on native filesystems.
+      const payloadInfo = await FS.getInfoAsync(folder + 'payload');
+      if (payloadInfo.exists && !payloadInfo.isDirectory) await deleteQuietly(folder + 'payload');
+      await FS.makeDirectoryAsync(folder + 'payload/', { intermediates: true });
+      const target = folder + 'payload/' + task.item.name, partial = folder + '.partial-' + task.item.id;
       checkCancelled(task);
       let cached = false;
+      // Upgrade old flat caches without retaining duplicate payload bytes. cache.json
+      // is bookkeeping, and a previous release may already have overwritten that file.
+      const legacy = folder + task.item.name;
+      if (!['cache.json', 'payload'].includes(task.item.name)) {
+        const legacyInfo = await FS.getInfoAsync(legacy);
+        if (legacyInfo.exists && !legacyInfo.isDirectory) {
+          const targetInfo = await FS.getInfoAsync(target);
+          if (!targetInfo.exists) {
+            try { await verifyFile(legacy, message, task); await FS.moveAsync({ from: legacy, to: target }); }
+            catch { checkCancelled(task); await deleteQuietly(legacy); }
+          } else await deleteQuietly(legacy);
+        }
+      }
       const info = await FS.getInfoAsync(target);
       if (task.item.localUri && !info.exists) throw new Error('本地接收缓存已被清理，请回到聊天重新接收文件');
       if (info.exists) {
@@ -329,20 +390,31 @@ export class TransferManager {
         } finally { await deleteQuietly(partial); }
       }
       checkCancelled(task);
-      this.update(task, { localUri: target, status: 'saving' });
+      this.update(task, { localUri: target });
       await FS.writeAsStringAsync(folder + 'cache.json', JSON.stringify({ size: message.size, touched: Date.now() }));
-      if (task.item.action === 'share') {
-        if (!(await Sharing.isAvailableAsync())) throw new Error('此设备暂不支持系统分享');
-        await Sharing.shareAsync(target, { mimeType: message.mime || 'application/octet-stream', dialogTitle: '分享文件' });
-        this.update(task, { status: 'completed', destination: '分享面板' });
-      } else {
-        const mime = message.mime || 'application/octet-stream';
-        const result = await exportReceived(target, task.item.name, mime, task.item.action !== 'file' && mime.startsWith('image/'));
-        this.update(task, { status: result.saved ? 'completed' : 'save-cancelled', destination: result.saved ? result.destination : undefined });
+      if (preview) {
+        // Keep a separate lease until the UI releases its local image source.
+        this.downloadLeases.set(folder, (this.downloadLeases.get(folder) || 0) + 1);
+        return;
       }
+      this.update(task, { status: 'queued' });
+      const presentation = presentationTail.catch(() => {}).then(async () => {
+        checkCancelled(task);
+        this.update(task, { status: 'saving' });
+        if (task.item.action === 'share') {
+          if (!(await Sharing.isAvailableAsync())) throw new Error('此设备暂不支持系统分享');
+          await Sharing.shareAsync(target, { mimeType: message.mime || 'application/octet-stream', dialogTitle: '分享文件' });
+          this.update(task, { status: 'completed', destination: '分享面板' });
+        } else {
+          const mime = message.mime || 'application/octet-stream';
+          const result = await exportReceived(target, task.item.name, mime, task.item.action !== 'file' && mime.startsWith('image/'));
+          this.update(task, { status: result.saved ? 'completed' : 'save-cancelled', destination: result.saved ? result.destination : undefined });
+        }
+      });
+      presentationTail = presentation.catch(() => {});
+      await presentation;
     } finally {
-      const remaining = (this.downloadLeases.get(folder) || 1) - 1;
-      if (remaining > 0) this.downloadLeases.set(folder, remaining); else this.downloadLeases.delete(folder);
+      this.releaseLease(folder);
     }
   }
 }
