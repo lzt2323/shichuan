@@ -43,6 +43,7 @@ export async function completePath(value, cwd) {
 }
 
 export function progressLabel(task, columns = 80) {
+  if (task.status === 'waiting') return '等待在线副本';
   const ratio = task.total > 0 ? Math.max(0, Math.min(1, task.bytes / task.total)) : task.status === 'done' ? 1 : 0;
   const percent = `${Math.floor(ratio * 100)}%`;
   if (columns < 18) return task.status === 'queued' ? '等待' : percent;

@@ -22,3 +22,5 @@ coverage/
 *.keystore
 *.jks
 apps/mobile/credentials.json
+apps/mobile/modules/*/android/build/
+apps/mobile/modules/*/android/.gradle/

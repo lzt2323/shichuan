@@ -9,7 +9,7 @@ import path from 'node:path';
 const require = createRequire(import.meta.url);
 const temporary = await mkdtemp(path.join(os.tmpdir(), 'pickdrop-requests-'));
 const packaged = process.env.PICKDROP_TEST_EXECUTABLE;
-const app = await electron.launch({ executablePath: packaged || require('electron'), args: packaged ? [] : ['.'], env: { ...process.env, PICKDROP_USER_DATA: temporary } });
+const app = await electron.launch({ executablePath: packaged || require('electron'), args: packaged ? [] : ['.'], env: { ...process.env, PICKDROP_TEST_LEGACY_GROUPS: '1', PICKDROP_USER_DATA: temporary } });
 try {
   const page = await app.firstWindow(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -19,9 +19,9 @@ try {
     const response = await fetch(group.baseUrl + route, { method: body ? 'POST' : 'GET', headers: { 'X-Room-Key': group.key, 'X-Device-Id': device.id, 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
     assert.ok(response.ok, `${route}: ${response.status}`); return response.json();
   }
-  async function request(name) {
+  async function request(name, id = randomUUID(), reset = false) {
     const invite = await api('/api/pair/invite', {});
-    return api('/api/pair/request', { code: invite.code, device: { id: randomUUID(), name, kind: 'desktop' } });
+    return api('/api/pair/request', { code: invite.code, reset, device: { id, name, kind: 'desktop' } });
   }
   async function status(ticket) {
     const response = await fetch(`${group.baseUrl}/api/pair/status/${ticket.requestId}`, { headers: { 'X-Poll-Token': ticket.pollToken } });
@@ -31,7 +31,7 @@ try {
   await page.getByText('历史消息 45', { exact: true }).waitFor();
   await page.locator('#message-input').fill('正在编辑的消息不会丢失');
   await page.locator('#timeline').evaluate(node => { node.scrollTop = node.scrollHeight; window.lastMessageNode = node.lastElementChild; });
-  const first = await request('Linux 工作站');
+  const firstId = randomUUID(), first = await request('Linux 工作站', firstId);
   await page.locator('#join-request-banner').waitFor();
   assert.equal(await page.locator('#timeline [data-request-id]').count(), 0);
   assert.equal(await page.locator('#message-input').inputValue(), '正在编辑的消息不会丢失');
@@ -62,6 +62,16 @@ try {
   assert.equal(await page.locator('#join-request-banner').isVisible(), false);
   await page.locator('#close-panel').click();
   assert.equal(await page.locator('#message-input').inputValue(), '正在编辑的消息不会丢失');
+  const recovery = await request('Linux 工作站', firstId, true);
+  await page.locator('#join-request-reset-note').waitFor();
+  assert.match(await page.locator('#join-request-reset-note').innerText(), /原连接将失效/);
+  assert.equal(await page.locator('#approve-join-request').innerText(), '恢复授权');
+  await page.locator('#approve-join-request').click();
+  await page.locator('#confirm-operation').waitFor();
+  assert.equal(await status(recovery), 'pending', 'identity reset requires explicit confirmation');
+  await page.locator('#confirm-operation').click();
+  await page.waitForFunction(() => document.querySelector('#join-request-banner').hidden);
+  assert.equal(await status(recovery), 'approved');
   assert.deepEqual(errors, []);
   console.log('Request UI smoke passed: long history, fixed actions, 280px window, multi-request approval/denial, remote decisions, preserved draft and message DOM.');
 } finally { await app.close(); await rm(temporary, { recursive: true, force: true }); }

@@ -13,6 +13,12 @@ contextBridge.exposeInMainWorld('pickdrop', {
   joinGroup: code => ipcRenderer.invoke('group:join', code),
   joinAt: (address, code, groupId) => ipcRenderer.invoke('group:join-at', address, code, groupId),
   listNearby: () => ipcRenderer.invoke('group:nearby'),
+  discoveryStatus: () => ipcRenderer.invoke('group:discovery-status'),
+  onDiscoveryError: subscribe('discovery:error'),
+  renameGroup: name => ipcRenderer.invoke('group:rename', name),
+  upgradeGroup: () => ipcRenderer.invoke('group:upgrade'),
+  reconnectGroup: address => ipcRenderer.invoke('group:reconnect', address),
+  deleteGroup: () => ipcRenderer.invoke('group:delete'),
   onNearbyChanged: subscribe('nearby:changed'),
   removeMember: id => ipcRenderer.invoke('group:remove-member', id),
   secureMembers: () => ipcRenderer.invoke('group:secure-members'),
@@ -56,17 +62,19 @@ contextBridge.exposeInMainWorld('pickdrop', {
 let tab, latestState = { collapsed: false }, groupName = '拾传';
 function renderTab() {
   if (!tab) return;
-  tab.hidden = !latestState.collapsed || Boolean(latestState.transition);
+  tab.hidden = !latestState.collapsed && latestState.transition !== 'expand';
   tab.title = `${groupName} · 拖动移位，悬停展开，拖入文件发送`;
   tab.dataset.accepting = String(Boolean(latestState.accepting));
   tab.setAttribute('aria-label', `${groupName} · 展开群窗口`);
   if (latestState.moving) suppressTabClick = true;
   const root = document.documentElement;
   root.dataset.pickdropCollapsed = latestState.collapsed && !latestState.transition ? 'true' : 'false';
+  root.dataset.nativeFrame = String(Boolean(latestState.nativeFrame));
   root.dataset.windowEdge = latestState.edge || '';
   root.dataset.snapEdge = latestState.candidateEdge || '';
   root.dataset.windowMoving = latestState.moving ? 'true' : 'false';
   root.dataset.windowTransition = latestState.transition || '';
+  root.style.setProperty('--motion-duration', `${latestState.motionDuration || 180}ms`);
   root.style.setProperty('--content-width', `${latestState.contentWidth || 340}px`);
   root.style.setProperty('--content-height', `${latestState.contentHeight || 470}px`);
 }
@@ -100,6 +108,7 @@ window.addEventListener('pointerup', () => ipcRenderer.send('window:activity', '
 // Main reads screen coordinates directly; renderer screenX can jump on mixed-DPI displays.
 let windowPointer = null, suppressTabClick = false, clickReset;
 window.addEventListener('pointerdown', event => {
+  if (latestState.nativeFrame) return;
   if (event.button !== 0 || !(event.target instanceof Element)) return;
   const handle = event.target.closest('#pickdrop-native-tab, .titlebar, .custom-window-resize-handle');
   const resizing = handle?.classList.contains('custom-window-resize-handle');

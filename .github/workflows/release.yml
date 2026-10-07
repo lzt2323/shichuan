@@ -69,6 +69,11 @@ jobs:
       - run: ${{ matrix.command }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Smoke test the packaged Mac application
+        if: matrix.target == 'mac'
+        env:
+          PICKDROP_TEST_EXECUTABLE: ${{ github.workspace }}/dist/mac-arm64/PickDrop.app/Contents/MacOS/PickDrop
+        run: pnpm desktop:smoke
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: installer-${{ matrix.target }}

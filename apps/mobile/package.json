@@ -1,6 +1,6 @@
 {
   "name": "@pickdrop/mobile",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "main": "index.js",
   "scripts": {
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@expo/metro-runtime": "~57.0.16",
+    "@noble/curves": "1.9.7",
     "@noble/hashes": "^1.8.0",
     "expo": "57.0.26",
     "expo-build-properties": "~57.0.22",

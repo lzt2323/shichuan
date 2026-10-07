@@ -45,7 +45,7 @@ export function getLayout(width = 80, height = 24) {
   return { kind, columns, rows, leftWidth, rightWidth, mainWidth, bodyHeight, contentHeight };
 }
 export function groupTransfers(snapshot, groupId) { return (snapshot.transfers || []).filter(task => groupId && task.groupId === groupId); }
-export const taskStatus = task => ({ queued: '等待', running: task.type === 'download' ? '下载中' : '上传中', done: '完成', failed: '失败', cancelled: '已取消' }[task.status] || task.status);
+export const taskStatus = task => ({ queued: '等待', waiting: '等待在线副本', running: task.type === 'download' ? '下载中' : '上传中', done: '完成', failed: '失败', cancelled: '已取消' }[task.status] || task.status);
 // Snapshot objects are replaced by polling. Cache immutable display rows by message
 // content, rather than object identity, so each keystroke does not segment history.
 const messageCache = new Map();

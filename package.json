@@ -1,6 +1,6 @@
 {
   "name": "pickdrop",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "packageManager": "pnpm@11.19.0",
   "engines": {
     "node": ">=24"
@@ -13,7 +13,7 @@
     "start": "electron .",
     "server": "node server/cli.js",
     "test": "node --test --test-concurrency=1 tests/*.test.js",
-    "check": "node --check server/index.js && node --check server/groups.js && node --check server/pairing.js && node --check server/discovery.js && node --check server/discovery-directory.js && node --check apps/desktop/main.cjs && node --check apps/desktop/preload.cjs && node --check apps/desktop/clipboard-image.cjs && node --check apps/desktop/public/clipboard-images.js && node --check apps/desktop/window-controller.cjs && node --check apps/desktop/public/app.js && node --check server/network.js && node --check server/desktop-proxy.js && node --check apps/tui/cli.js && node --check apps/tui/daemon.js && node --check apps/tui/ui.js && node --check apps/tui/transfers.js && node --check scripts/package-linux.js && node --check apps/tui/layout.js && node --check apps/tui/view.js && node --check apps/tui/navigation-view.js && node --check apps/tui/preferences.js && node --check apps/tui/launcher.js && node --check scripts/tui-visual-smoke.js && node --check server/cache.js && node --check server/history-store.js && node --check server/persistence.js && node --check shared/download.js && node --check shared/history.js && node --check apps/mobile/plugins/withPickDropStorage.js && node --check scripts/desktop-quit-smoke.js",
+    "check": "node --check server/index.js && node --check server/groups.js && node --check server/pairing.js && node --check server/discovery.js && node --check server/discovery-directory.js && node --check apps/desktop/main.cjs && node --check apps/desktop/preload.cjs && node --check apps/desktop/clipboard-image.cjs && node --check apps/desktop/public/clipboard-images.js && node --check apps/desktop/window-controller.cjs && node --check apps/desktop/public/app.js && node --check server/network.js && node --check server/desktop-proxy.js && node --check apps/tui/cli.js && node --check apps/tui/daemon.js && node --check apps/tui/ui.js && node --check apps/tui/transfers.js && node --check scripts/package-linux.js && node --check apps/tui/layout.js && node --check apps/tui/view.js && node --check apps/tui/navigation-view.js && node --check apps/tui/preferences.js && node --check apps/tui/launcher.js && node --check scripts/tui-visual-smoke.js && node --check server/cache.js && node --check server/history-store.js && node --check server/persistence.js && node --check shared/download.js && node --check shared/history.js && node --check apps/mobile/plugins/withPickDropStorage.js && node --check scripts/desktop-quit-smoke.js && node --check shared/peer-protocol.js && node --check server/peer-store.js && node --check apps/mobile/src/peer-client.js && node --check apps/desktop/platform-window.cjs",
     "desktop:smoke": "node scripts/desktop-groups-smoke.js",
     "desktop:package": "pnpm desktop:prepare && electron-builder --config electron-builder.cjs --mac dir --arm64 && node scripts/archive-mac.js",
     "desktop:package:windows": "pnpm desktop:prepare && electron-builder --config electron-builder.cjs --win portable --x64",
@@ -29,12 +29,16 @@
     "linux:package": "node scripts/package-linux.js",
     "desktop:requests": "node scripts/desktop-requests-smoke.js",
     "tui:visual": "node scripts/tui-visual-smoke.js",
-    "desktop:quit": "node scripts/desktop-quit-smoke.js"
+    "desktop:quit": "node scripts/desktop-quit-smoke.js",
+    "desktop:peer": "node scripts/desktop-peer-smoke.js",
+    "desktop:lifecycle": "node scripts/desktop-lifecycle-smoke.js"
   },
   "dependencies": {
+    "@noble/curves": "1.9.7",
+    "@noble/hashes": "1.8.0",
+    "bonjour-service": "1.4.4",
     "qrcode": "1.5.4",
-    "ws": "8.18.3",
-    "bonjour-service": "1.4.4"
+    "ws": "8.18.3"
   },
   "devDependencies": {
     "electron": "44.5.1",

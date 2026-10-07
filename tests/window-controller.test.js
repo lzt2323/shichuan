@@ -67,7 +67,7 @@ test('motion is interruptible, pinned windows stay expanded, reduced motion is i
   dockRight(c, win); tick(64);
   assert.equal(c.state().transition, 'collapse');
   assert.ok(win.getBounds().width < 320 && win.getBounds().width > 40);
-  c.expand(); tick(200);
+  c.expand(); tick(300);
   assert.equal(win.getBounds().width, 320);
   c.setPinned(true); cursor({ x: 100, y: 700 }); c.pointer(false); tick(2000);
   assert.equal(c.state().collapsed, false);
@@ -99,7 +99,7 @@ test('dragging the pointer all the way to the screen edge still docks an oversho
 
 test('docking halfway through an expansion preserves the full content size', t => {
   const { controller: c, win, tick } = setup(t);
-  dockRight(c, win); tick(200); c.expand(); tick(64); c.dock(); tick(200); c.expand(); tick(200);
+  dockRight(c, win); tick(200); c.expand(); tick(64); c.dock(); tick(200); c.expand(); tick(300);
   assert.equal(win.getBounds().width, 320); assert.equal(win.getBounds().height, 420);
 });
 

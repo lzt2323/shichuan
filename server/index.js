@@ -38,7 +38,7 @@ async function readJson(req) {
   try { return JSON.parse(body); } catch { throw fail(400, '请求格式不正确'); }
 }
 
-export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', listen = true, maxFileBytes = 8 * 1024 ** 3, group, pairingOptions = {} } = {}) {
+export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', listen = true, maxFileBytes = 8 * 1024 ** 3, group, pairingOptions = {}, peer } = {}) {
   if (!dataDir) throw new Error('dataDir is required');
   const filesDir = path.join(dataDir, 'files');
   await fs.mkdir(filesDir, { recursive: true, mode: 0o700 });
@@ -60,7 +60,7 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
   // Only abandoned app-owned upload directories are swept; committed files are retained.
   for (const entry of await fs.readdir(filesDir, { withFileTypes: true })) {
     if (!entry.isDirectory() || !uuidPattern.test(entry.name)) continue;
-    const record = history.get(entry.name);
+    const record = peer ? peer.state().messages.find(m => m.id === entry.name) : history.get(entry.name);
     if (record && !record.deleted) continue;
     const folder = path.join(filesDir, entry.name), info = await fs.stat(folder);
     if (record?.deleted || Date.now() - info.mtimeMs > 24 * 60 * 60 * 1000) await fs.rm(folder, { recursive: true, force: true });
@@ -85,8 +85,8 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
   let closing = false, closePromise;
   const activeUploads = new Set(), activeDownloads = new Set();
   let transfersPaused = false, cleanupBusy = false, activeTransferRequests = 0;
-  const summary = () => ({ devices: [...devices.values()], maxFileBytes, authVersion: auth.version });
-  const state = () => ({ ...history.page(), ...summary() });
+  const summary = () => ({ devices: peer ? peer.state().members.map(member => ({ ...member, online: Boolean(connections.get(member.id)?.size) || peer.peers().some(p => p.deviceId === member.id && p.online) })) : [...devices.values()], maxFileBytes, authVersion: peer ? 3 : auth.version });
+  const state = () => ({ ...(peer ? { messages: peer.state().messages, history: { hasMore: false, before: null, total: peer.state().messages.length } } : history.page()), ...summary() });
   const persist = () => {
     const snapshot = { version: 2, auth: structuredClone(auth), devices: [...devices.values()].map(d => ({ ...d, online: false })) };
     const operation = writeQueue.catch(() => {}).then(() => writeJsonWithBackup(statePath, snapshot));
@@ -109,12 +109,12 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
     if (!device) throw fail(400, '请先连接设备');
     return device;
   };
-  const authorize = (deviceId, credential) => auth.version === 2 ? devices.has(deviceId) && validCredential(deviceId, credential) : validKey(credential);
+  const authorize = (deviceId, credential) => peer ? deviceId === group.hostDeviceId && validCredential(deviceId, credential) : auth.version === 2 ? devices.has(deviceId) && validCredential(deviceId, credential) : validKey(credential);
   const checkRequest = req => {
     if (!authorize(req.headers['x-device-id'], req.headers['x-room-key'])) throw fail(401, '设备授权已失效，请重新申请加入');
   };
   const fileFor = id => {
-    const message = history.get(id);
+    const message = peer ? peer.state().messages.find(m => m.id === id) : history.get(id);
     return message?.type === 'file' && !message.deleted ? { message, path: path.join(filesDir, id, message.fileName) } : null;
   };
 
@@ -145,12 +145,15 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
     try { await registerDeviceNow(body); } catch (error) { if (previous) auth.credentials[body.id] = previous; else delete auth.credentials[body.id]; throw error; }
     return token;
   });
-  const approveDevice = (body, actorRequest) => memberOperation(async () => {
+  const approveDevice = (body, actorRequest, reset = false) => memberOperation(async () => {
     if (actorRequest) checkRequest(actorRequest);
     if (auth.version !== 2) { await registerDeviceNow(body); return key; }
-    if (devices.has(body.id) || auth.credentials[body.id]) throw fail(409, '此设备已加入，不能替换设备凭据');
+    const existing = devices.has(body.id) || auth.credentials[body.id];
+    if (existing && (!reset || actorRequest?.headers['x-device-id'] !== group.hostDeviceId || body.id === group.hostDeviceId)) throw fail(409, '此设备已加入，只有群创建者可明确批准重置授权');
+    const previousCredential = auth.credentials[body.id];
     const token = randomBytes(32).toString('hex'); auth.credentials[body.id] = tokenHash(token);
-    try { await registerDeviceNow(body); } catch (error) { delete auth.credentials[body.id]; throw error; }
+    try { await registerDeviceNow(body); } catch (error) { if (previousCredential) auth.credentials[body.id] = previousCredential; else delete auth.credentials[body.id]; throw error; }
+    if (existing) disconnectDevice(body.id);
     return token;
   });
   const pairing = group ? createGroupPairing({ ...pairingOptions, group, key, registerDevice, approveDevice,
@@ -192,6 +195,13 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
   });
 
   async function deleteFiles(ids, req) {
+    if (peer) {
+      if (!Array.isArray(ids) || ids.length > 100 || ids.some(id => !uuidPattern.test(id))) throw fail(400, '请选择文件');
+      if (activeTransferRequests || activeUploads.size || activeDownloads.size) throw fail(409, '有文件正在传输');
+      if (req) checkRequest(req);
+      for (const id of ids) await fs.rm(path.join(filesDir, id), { recursive: true, force: true });
+      return { removed: ids.length, ...history.stats() };
+    }
     if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some(id => !uuidPattern.test(id))) throw fail(400, '请选择 1 至 100 个文件');
     if (closing || activeTransferRequests || activeUploads.size || activeDownloads.size) throw fail(409, '有文件正在传输，请稍后清理');
     return memberOperation(async () => {
@@ -222,15 +232,18 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
       if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
       const url = new URL(req.url, 'http://localhost');
       const route = url.pathname;
+      if (peer && await peer.handle(req, res, url)) return;
+      if (!peer && route === '/api/peer/info') throw fail(404, '此群使用旧版协议');
       if (req.method === 'GET' && staticFiles.has(route)) {
         const [file, mime] = staticFiles.get(route);
         res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; connect-src 'self' http: https: ws: wss:; img-src 'self' data: blob: http: https:; style-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'" });
         await pipeline(createReadStream(file), res); return;
       }
       if (pairing && route === '/api/group/probe' && req.method === 'POST') { const body = await readJson(req); return json(res, 200, pairing.probe(body.challenge, body.deviceId, body.authVersion)); }
+      if (peer && (route === '/api/pair/request' || route.startsWith('/api/pair/status/'))) throw fail(409, '此群需要新版点对点签名配对');
       if (pairing && route === '/api/pair/request' && req.method === 'POST') {
         const body = await readJson(req);
-        return json(res, 202, pairing.request(body.code, body.device, req.socket.remoteAddress));
+        return json(res, 202, pairing.request(body.code, body.device, req.socket.remoteAddress, body.reset === true));
       }
       if (pairing && route.startsWith('/api/pair/status/') && req.method === 'GET') return json(res, 200, pairing.status(route.slice('/api/pair/status/'.length), req.headers['x-poll-token'], req.socket.remoteAddress));
       checkRequest(req);
@@ -254,9 +267,10 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
         res.once('finish', release); res.once('close', release);
       }
       if (route === '/api/state' && req.method === 'GET') return json(res, 200, state());
+      if (peer && route === '/api/history' && req.method === 'GET') return json(res, 200, state());
       if (route === '/api/history' && req.method === 'GET') return json(res, 200, history.page({ before: url.searchParams.get('before'), limit: url.searchParams.get('limit') || 100 }));
       if (route.startsWith('/api/messages/') && req.method === 'GET') {
-        const message = history.get(route.slice('/api/messages/'.length));
+        const message = peer ? peer.state().messages.find(m => m.id === route.slice('/api/messages/'.length)) : history.get(route.slice('/api/messages/'.length));
         if (!message) throw fail(404, '找不到这条消息');
         return json(res, 200, message);
       }
@@ -294,7 +308,7 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
         if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 10000) throw fail(400, '请输入 10000 字以内的内容');
         const message = { id: randomUUID(), type: 'text', text: body.text.trim(), senderId: device.id, senderName: device.name, createdAt: new Date().toISOString() };
         await memberOperation(async () => {
-          checkRequest(req); Object.assign(message, history.add(message));
+          checkRequest(req); if (peer) await peer.appendMessage(message); else Object.assign(message, history.add(message));
         });
         broadcast([message]); return json(res, 201, message);
       }
@@ -321,7 +335,7 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
             checkRequest(req);
             const message = { id, type: 'file', fileName, size, mime: String(req.headers['content-type'] || 'application/octet-stream').slice(0, 100), sha256: hash.digest('hex'), senderId: device.id, senderName: device.name, createdAt: new Date().toISOString() };
             await memberOperation(async () => {
-              checkRequest(req); Object.assign(message, history.add(message));
+              checkRequest(req); if (peer) await peer.appendMessage(message); else Object.assign(message, history.add(message));
             });
             broadcast([message]); json(res, 201, message);
           } catch (error) { await fs.rm(dir, { recursive: true, force: true }); throw error; }
@@ -334,6 +348,7 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
         if (closing || transfersPaused || cleanupBusy) throw fail(503, '正在切换网络，请稍后重试');
         const record = fileFor(route.slice('/api/files/'.length));
         if (!record) throw fail(404, '找不到这个文件');
+        if (peer) await peer.prepareFile(record.message.id);
         const stat = await fs.stat(record.path).catch(() => { throw fail(404, '文件已从磁盘移除'); });
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': stat.size, 'Content-Disposition': `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(record.message.fileName)}`, 'X-Content-SHA256': record.message.sha256, 'Cache-Control': 'no-store' });
         const download = pipeline(createReadStream(record.path), res); activeDownloads.add(download);
@@ -388,6 +403,9 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
     pauseTransfers(value = true) { transfersPaused = Boolean(value); },
     pairingLinks: addresses.map(address => `${address}/#key=${key}`),
     fileFor, state, registerDevice, pairing, ensureHostDevice,
+    renameGroup(name) { if (group) group.name = name; },
+    refreshPeerState() { broadcast(peer ? peer.state().messages : []); },
+    exportMessages() { const all=[];let before;do {const page=history.page({before,limit:100});all.unshift(...page.messages);if(!page.history.hasMore)break;before=page.history.before;}while(before);return all; },
     storage: () => history.stats(), listFiles: options => history.files(options), deleteFiles,
     getAuthVersion: () => auth.version,
     secureMembers,

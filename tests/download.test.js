@@ -64,3 +64,12 @@ test('HTTP errors never leave a file and invalid metadata never makes a request'
   await assert.rejects(downloadVerified({ ...f, size: -1, sha256: digest('') }), /记录无效/);
   assert.equal(requests, 1);
 });
+
+test('unresponsive holder has a bounded header wait but active transfers may run longer', async t => {
+  const stalled = await fixture(t, () => {});
+  await assert.rejects(downloadVerified({ ...stalled, size: 1, sha256: digest('x'), responseTimeoutMs: 20 }), /连接超时/);
+  await assert.rejects(fs.stat(stalled.destination), { code: 'ENOENT' });
+  const active = await fixture(t, (_req, res) => { res.writeHead(200); res.write('x'); setTimeout(() => res.end('y'), 100); });
+  await downloadVerified({ ...active, size: 2, sha256: digest('xy'), responseTimeoutMs: 50 });
+  assert.equal(await fs.readFile(active.destination, 'utf8'), 'xy');
+});

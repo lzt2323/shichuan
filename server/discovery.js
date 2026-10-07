@@ -1,5 +1,6 @@
 import dgram from 'node:dgram';
 import { isIPv4 } from 'node:net';
+import { createHash } from 'node:crypto';
 import { Bonjour } from 'bonjour-service';
 import { isPublicIPv4 } from './network.js';
 
@@ -7,12 +8,12 @@ const PORT = 47320, MULTICAST = '239.255.47.32';
 export const SERVICE_TYPE = '_pickdrop._tcp.local';
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export function discoveryTxt(entry) {
-  return { protocol: 'pickdrop', version: '1', groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: String(entry.name || '传输群').slice(0, 40) };
+  return { protocol: 'pickdrop', version: '1', groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: String(entry.name || '传输群').slice(0, 40), ...(entry.peerProtocol === 'pickdrop-peer-v1' ? { peerProtocol: entry.peerProtocol } : {}) };
 }
 export function parseDiscoveredService(service, now = Date.now()) {
   const txt = service.txt || {};
   if (txt.protocol !== 'pickdrop' || String(txt.version) !== '1' || !uuid.test(txt.groupId) || !uuid.test(txt.hostDeviceId) || !Number.isInteger(service.port) || service.port < 1 || service.port > 65535) return [];
-  return [...new Set(service.addresses || [])].filter(isPublicIPv4).map(address => ({ groupId: txt.groupId, hostDeviceId: txt.hostDeviceId, name: String(txt.name || '传输群').slice(0, 40), baseUrl: `http://${address}:${service.port}`, seenAt: now, transport: 'mdns' }));
+  return [...new Set(service.addresses || [])].filter(isPublicIPv4).map(address => ({ groupId: txt.groupId, hostDeviceId: txt.hostDeviceId, name: String(txt.name || '传输群').slice(0, 40), baseUrl: `http://${address}:${service.port}`, ...(txt.peerProtocol === 'pickdrop-peer-v1' ? { peerProtocol: txt.peerProtocol } : {}), seenAt: now, transport: 'mdns' }));
 }
 // Bonjour's default records() enumerates EVERY adapter, independent of its
 // multicast socket setting. Override that public method before asynchronous
@@ -68,17 +69,20 @@ export async function createLanDiscovery({ getAnnouncements, onRecord, onChanged
     const wanted = new Set(entries.map(entry => entry.groupId));
     for (const [id, value] of published) if (!wanted.has(id)) { value.service.stop(); published.delete(id); }
     for (const entry of entries) {
-      const signature = JSON.stringify([entry.port, entry.name, interfaceAddress]);
+      const signature = JSON.stringify([entry.port, entry.name, interfaceAddress, entry.hostDeviceId, entry.peerProtocol]);
       if (published.get(entry.groupId)?.signature === signature) continue;
       published.get(entry.groupId)?.service.stop();
-      const service = bonjour.publish({ name: `pickdrop-${entry.groupId}`, type: 'pickdrop', protocol: 'tcp', port: entry.port, host: `pickdrop-${entry.groupId}.local`, txt: discoveryTxt(entry), disableIPv6: true });
+      // Every member can announce the same peer group. DNS-SD instance and host
+      // names must identify its provider, otherwise Bonjour reports a collision.
+      const instance = `pickdrop-${createHash('sha256').update(`${entry.groupId}:${entry.hostDeviceId}`).digest('hex').slice(0, 40)}`;
+      const service = bonjour.publish({ name: instance, type: 'pickdrop', protocol: 'tcp', port: entry.port, host: `pickdrop-${entry.hostDeviceId}.local`, txt: discoveryTxt(entry), disableIPv6: true });
       restrictServiceAddress(service, interfaceAddress);
       published.set(entry.groupId, { signature, service });
     }
   };
   const announce = () => {
     if (!socket || !ready || closed) return;
-    for (const entry of getAnnouncements()) socket.send(Buffer.from(JSON.stringify({ protocol: 'pickdrop-groups-v1', groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: entry.name, port: entry.port, directoryPort: entry.directoryPort })), PORT, MULTICAST, error => { if (error) onError(error); });
+    for (const entry of getAnnouncements()) socket.send(Buffer.from(JSON.stringify({ protocol: 'pickdrop-groups-v1', groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: entry.name, port: entry.port, directoryPort: entry.directoryPort, ...(entry.peerProtocol === 'pickdrop-peer-v1' ? { peerProtocol: entry.peerProtocol } : {}) })), PORT, MULTICAST, error => { if (error) onError(error); });
   };
   const refresh = () => {
     if (closed) return;
@@ -105,7 +109,7 @@ export async function createLanDiscovery({ getAnnouncements, onRecord, onChanged
           const entry = JSON.parse(bytes.toString());
           if (entry.protocol === 'pickdrop-discover-v1') { if (now() - lastResponse > 300) { lastResponse = now(); announce(); } return; }
           if (entry.protocol !== 'pickdrop-groups-v1' || !uuid.test(entry.groupId) || !uuid.test(entry.hostDeviceId) || !Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535) return;
-          remember({ groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: String(entry.name || '传输群').slice(0, 40), baseUrl: `http://${sender.address}:${entry.port}`, ...(Number.isInteger(entry.directoryPort) && entry.directoryPort > 0 && entry.directoryPort <= 65535 ? { directoryPort: entry.directoryPort } : {}), seenAt: now(), transport: 'udp' });
+          remember({ groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: String(entry.name || '传输群').slice(0, 40), baseUrl: `http://${sender.address}:${entry.port}`, ...(entry.peerProtocol === 'pickdrop-peer-v1' ? { peerProtocol: entry.peerProtocol } : {}), ...(Number.isInteger(entry.directoryPort) && entry.directoryPort > 0 && entry.directoryPort <= 65535 ? { directoryPort: entry.directoryPort } : {}), seenAt: now(), transport: 'udp' });
         } catch { /* Ignore other applications and malformed advertisements. */ }
       });
       socket.on('error', onError);

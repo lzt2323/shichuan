@@ -7,7 +7,7 @@ import path from 'node:path';
 import WebSocket from 'ws';
 
 const dir = await mkdtemp(path.join(tmpdir(), 'pickdrop-visual-'));
-const app = await electron.launch({ args: ['.'], env: { ...process.env, PICKDROP_USER_DATA: dir } });
+const app = await electron.launch({ args: ['.'], env: { ...process.env, PICKDROP_TEST_LEGACY_GROUPS: '1', PICKDROP_USER_DATA: dir } });
 const peers = [], errors = [];
 app.process().stderr?.on('data', chunk => { const line = chunk.toString(); if (/Error|Exception|finalized/.test(line)) console.error('Electron stderr:', line); });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));

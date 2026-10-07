@@ -504,3 +504,27 @@ test('explicit save waits for the same-file preview verification and reuses its 
   assert.equal(env.downloads.length, 1); assert.equal(env.state.exported.length, 1);
   preview.release();
 });
+
+test('peer upload commits a local provider copy instead of sending to creator', async () => {
+  const env = setup(); let supplied;
+  const peer = { ...group(), mode: 'peer', authVersion: 3, peerUpload: async (uri, name) => { supplied = Buffer.from(env.files.get(uri)); return { id: 'peer-message', size: supplied.length }; } };
+  const [id] = await env.manager.importIncoming(peer, [{ uri: 'content://source', name: 'local.txt' }]);
+  await env.manager.start(id);
+  assert.deepEqual(supplied, content); assert.equal(env.uploads.length, 0);
+  assert.equal(env.manager.getSnapshot()[0].status, 'completed');
+});
+
+test('peer missing attachment waits durably, restarts, then resumes when a holder returns', async () => {
+  const env = setup(); let holder = false, retained = false;
+  const peer = { ...group(), mode: 'peer', authVersion: 3, peerFileSources: async () => ({ sources: holder ? [{ url: 'http://holder/api/peer/files/id', headers: { 'X-Peer-Proof': 'signed' } }] : [] }), peerReceived: async () => { retained = true; } };
+  const id = await env.manager.receive(peer, message, 'file');
+  for (let tick = 0; tick < 100 && env.manager.getSnapshot()[0].status !== 'waiting'; tick++) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal(env.manager.getSnapshot()[0].status, 'waiting'); assert.equal(env.downloads.length, 0);
+  assert.ok([...env.files.keys()].some(path => path.endsWith('/waiting/' + id + '.json')));
+  const restored = new env.Manager(); await restored.restoreDrafts([peer]);
+  assert.equal(restored.getSnapshot().find(item => item.id === id).status, 'waiting');
+  holder = true; restored.retryWaiting();
+  assert.equal((await settle(restored, id)).status, 'completed'); assert.equal(retained, true);
+  assert.equal(env.downloads[0].options.headers['X-Peer-Proof'], 'signed');
+  assert.ok(![...env.files.keys()].some(path => path.endsWith('/waiting/' + id + '.json')));
+});

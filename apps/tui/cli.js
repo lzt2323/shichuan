@@ -19,6 +19,12 @@ pickdrop start                     启动后台服务
 pickdrop status                    查询状态，不自动启动服务
 pickdrop stop                      停止服务及未完成传输
 pickdrop create "工作群"           创建群
+pickdrop rename "新群名" --group ID
+pickdrop leave --group ID           退出群
+pickdrop forget --group ID          从本机列表移除群
+pickdrop delete --group ID          创建者解散群
+pickdrop upgrade --group ID         将本机旧群升级为多端群
+pickdrop reconnect --group ID --address IP[:PORT]
 pickdrop nearby                    查看附近的群
 pickdrop join --link "完整邀请链接" 申请加入，等待群成员批准
 pickdrop join --address URL --code 123456
@@ -37,7 +43,7 @@ pickdrop network --interface eth0 --address 192.168.1.20
 pickdrop service install           写入可选 systemd 用户服务（不会自动启用）
 
 后台已启动时，退出 TUI 不会停止它。CLI 操作前请先 pickdrop start。
-发送成功表示文件已存入群主机；接收同名文件另存。
+发送成功表示文件已存入本机群副本；其他成员按需下载，接收同名文件另存。
 receive --all 逐页接收全部历史文件，使用一个任务依次保存。
 接收默认沿用上次保存目录，首次为 ~/Downloads/拾传。
 SSH 下文件属于远端 Linux。传输取消后重试会从头开始，不支持断点续传。
@@ -47,7 +53,7 @@ async function waitTasks(ids) {
   for (;;) {
     const { transfers } = await rpc('status'), tasks = ids.map(({ id }) => transfers.find(t => t.id === id));
     if (tasks.some(t => !t)) throw new Error('服务已重启，传输记录不再存在，请重新发送');
-    if (tasks.every(t => !['queued', 'running'].includes(t.status))) { print(tasks); if (tasks.some(t => t.status !== 'done')) process.exitCode = 1; return; }
+    if (tasks.every(t => !['queued', 'running', 'waiting'].includes(t.status))) { print(tasks); if (tasks.some(t => t.status !== 'done')) process.exitCode = 1; return; }
     await new Promise(resolve => setTimeout(resolve, 300));
   }
 }
@@ -68,7 +74,7 @@ async function main() {
     return;
   }
   if (command === 'daemon') {
-    const { createDaemon } = await import('./daemon.js'); const daemon = await createDaemon();
+    const { createDaemon } = await import('./daemon.js'); const daemon = await createDaemon({ managerOptions: { peerGroups: true } });
     process.once('SIGTERM', () => void daemon.close()); process.once('SIGINT', () => void daemon.close()); return;
   }
   if (command === 'service') {
@@ -86,7 +92,7 @@ async function main() {
     catch (error) {
       if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error;
       if (flags.background) await ensureDaemon();
-      else { const { createDaemon } = await import('./daemon.js'); owned = await createDaemon(); }
+      else { const { createDaemon } = await import('./daemon.js'); owned = await createDaemon({ managerOptions: { peerGroups: true } }); }
     }
     try { const { startUI } = await import('./ui.js'); await startUI({ persistent: !owned }); }
     finally { await owned?.close(); }
@@ -102,6 +108,7 @@ async function main() {
     catch (error) { if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) return print({ stopped: true, message: '服务已停止' }); throw error; }
   }
   if (command === 'create') return print(await rpc('create', { name: args.join(' ') }));
+  if (['rename', 'leave', 'forget', 'delete', 'upgrade', 'reconnect'].includes(command)) return print(await rpc(command, { group: flags.group, name: args.join(' '), address: flags.address }));
   if (command === 'nearby' || command === 'networks') return print(await rpc(command));
   if (command === 'network') { if (!flags.auto && (!flags.interface || !flags.address)) throw new Error('使用 --auto 或同时指定 --interface 和 --address'); return print(await rpc('network', { selection: flags.auto ? { mode: 'auto' } : { mode: 'manual', interfaceName: flags.interface, address: flags.address } })); }
   if (command === 'join') return print(await rpc('join', { link: flags.link, address: flags.address, code: flags.code }));

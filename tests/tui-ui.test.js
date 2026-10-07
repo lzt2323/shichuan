@@ -251,6 +251,8 @@ test('empty initial state retains onboarding and the create action', async t => 
   fits(ui.frame(), 60, 18);
   assert.match(ui.frame(), /创建|加入/);
   await action(ui, 0);
+  assert.match(ui.frame(), /传输群 1/);
+  await ui.key('\x15');
   await ui.key('新建中文群');
   await ui.key(keys.enter);
   assert.deepEqual(ui.calls.find(c => c.method === 'create')?.params, { name: '新建中文群' });
@@ -566,4 +568,49 @@ test('arrow at the oldest loaded message fetches an earlier page and keeps selec
   await ui.key(keys.right);
   assert.match(ui.frame(), /更早的消息/);
   assert.equal(ui.calls.filter(c => c.method === 'history').length, 1);
+});
+
+test('reset approval is explicit and cannot be approved by a replica', async t => {
+  const state = snapshot(); state.groups[0] = {...state.groups[0], mode:'peer', canManage:true}; state.requests[0].reset = true;
+  const ui = await mount(t, 80, 24, {snapshot:state});
+  await action(ui, 7); assert.match(ui.frame(), /原连接将失效/);
+  await ui.key(keys.enter); assert.match(ui.frame(), /恢复或重置/);
+  assert.equal(ui.calls.filter(call => call.method === 'respond').length, 0);
+  await ui.key(keys.down); await ui.key(keys.enter);
+  assert.equal(ui.calls.filter(call => call.method === 'respond').length, 1);
+  state.groups[0].canManage = false;
+  const replica = await mount(t, 80, 24, {snapshot:state}); await action(replica, 7); await replica.key(keys.enter);
+  assert.equal(replica.calls.filter(call => call.method === 'respond').length, 0);
+  assert.match(replica.frame(), /仅群创建者/);
+});
+
+test('peer group management distinguishes creator from replica and confirms destructive actions', async t => {
+  const state = snapshot(); state.groups[0] = {...state.groups[0], mode:'peer', canManage:false};
+  const ui = await mount(t, 80, 24, {snapshot:state}); await action(ui, 12);
+  assert.match(ui.frame(), /退出此群/); assert.doesNotMatch(ui.frame(), /重命名群|解散整个群|升级为多设备群/);
+  await ui.key(keys.enter); assert.match(ui.frame(), /重新加入需要邀请/);
+  assert.equal(ui.calls.filter(call => call.method === 'leave').length, 0);
+  await ui.key(keys.down); await ui.key(keys.enter);
+  assert.deepEqual(ui.calls.find(call => call.method === 'leave')?.params, {group:'a'});
+});
+
+test('waiting replica download remains one task and can be retried or cancelled', async t => {
+  const state = snapshot(); const message = state.state.messages.at(-1);
+  state.transfers = [{id:'waiting-task',groupId:'a',messageId:message.id,type:'download',status:'waiting',name:'等待的文件',bytes:0,total:100}];
+  const ui = await mount(t, 80, 24, {snapshot:state});
+  await ui.key(keys.right); await ui.key(keys.enter);
+  assert.equal(ui.calls.filter(call => call.method === 'receive').length, 0);
+  assert.match(ui.frame(), /等待在线副本/);
+  await action(ui, 8); await ui.key(keys.right);
+  assert.match(ui.frame(), /立即重试/); assert.match(ui.frame(), /取消等待/);
+  await ui.key(keys.enter); assert.deepEqual(ui.calls.find(call => call.method === 'retry')?.params, {id:'waiting-task'});
+});
+
+test('pending offline departure remains visible and never reports success', async t => {
+  const state = snapshot(); state.groups[0] = {...state.groups[0], mode:'peer', canManage:false};
+  const ui = await mount(t, 80, 24, {snapshot:state, request:async method => { if (method === 'leave') throw Object.assign(new Error('其他成员离线，已保存退出请求，请上线同步后重试'), {status:409}); }});
+  await action(ui, 12); await ui.key(keys.enter); await ui.key(keys.down); await ui.key(keys.enter);
+  assert.match(ui.frame(), /其他成员离线/);
+  assert.doesNotMatch(ui.frame(), /群操作已完成/);
+  assert.match(ui.frame(), /确认执行/);
 });

@@ -47,7 +47,7 @@ export async function createDaemon({ paths = locations(), managerOptions = {} } 
   const transfers = new TransferQueue({ manager, fetchState: group => api(group, '/api/state') });
   async function connectedGroup(query) {
     const group = await manager.resolveGroup(groupBy(manager.listGroups(), query).id);
-    if (!group.online) throw new Error('群主机离线，请确认电脑与手机处于可互通的局域网');
+    if (!group.online) throw new Error('群暂时无法连接，请确认设备处于可互通的网络');
     return group;
   }
   async function refresh() {
@@ -95,6 +95,18 @@ export async function createDaemon({ paths = locations(), managerOptions = {} } 
         return { ...await dispatch('status'), selectedGroupId: group?.id, state: group ? states.get(group.id) || { messages: [], devices: [] } : { messages: [], devices: [] }, requests: group ? requests.get(group.id) || [] : [] };
       }
       case 'create': { const group = await manager.createGroup(p.name); void refresh(); return publicGroup(group); }
+      case 'rename': return publicGroup(await manager.renameGroup(groupBy(manager.listGroups(), p.group).id, p.name));
+      case 'upgrade': return publicGroup(await manager.upgradeGroup(groupBy(manager.listGroups(), p.group).id));
+      case 'reconnect': return publicGroup(await manager.reconnectGroup(groupBy(manager.listGroups(), p.group).id, p.address));
+      case 'leave':
+      case 'forget':
+      case 'delete': {
+        const id = groupBy(manager.listGroups(), p.group).id;
+        for (const task of transfers.list()) if (task.groupId === id) transfers.cancel(task.id);
+        const result = await manager[`${method}Group`](id);
+        sockets.get(id)?.terminate(); sockets.delete(id); states.delete(id); requests.delete(id);
+        return result;
+      }
       case 'nearby': return manager.listNearby?.() || [];
       case 'networks': return network();
       case 'network': {

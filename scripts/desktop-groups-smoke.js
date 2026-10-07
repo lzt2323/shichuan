@@ -18,7 +18,7 @@ const errors = [];
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const bootstrap = page => page.evaluate(() => window.pickdrop.bootstrap());
 async function start(dataDir) {
-  const app = await electron.launch({ executablePath, args: packaged ? [] : [root], cwd: root, env: { ...process.env, PICKDROP_USER_DATA: dataDir }, timeout: 30000 });
+  const app = await electron.launch({ executablePath, args: packaged ? [] : [root], cwd: root, env: { ...process.env, PICKDROP_TEST_LEGACY_GROUPS: '1', PICKDROP_USER_DATA: dataDir }, timeout: 30000 });
   const capture = page => page.on('pageerror', error => errors.push(error.message));
   app.windows().forEach(capture); app.on('window', capture);
   return app;
@@ -104,7 +104,7 @@ try {
   await work.locator('#close-panel').click();
   await peerHome.locator('#group-menu-button').click(); await peerHome.locator('#join-group').click();
   await peerHome.locator('#join-code').fill(code); await peerHome.locator('#confirm-join-group').click();
-  await work.locator('[data-action=approve-join]').waitFor({ timeout: 15000 });
+  await work.locator('[data-action=approve-join]').waitFor({ timeout: 15000 }).catch(async error => { console.error('Pairing state:', await peerHome.locator('body').innerText()); throw error; });
   await work.locator('[data-action=approve-join]').click();
   const peerWork = await pageFor(peerApp, workConfig.group.id); await connected(peerWork);
   await peerWork.getByText('群文件隔离.bin', {exact:true}).waitFor();
@@ -195,8 +195,8 @@ try {
   const leftAccess = await fetch(reGrant.room.baseUrl + '/api/state', { headers: { 'X-Room-Key': reGrant.room.key, 'X-Device-Id': reGrant.device.id } });
   assert.ok([401, 403].includes(leftAccess.status));
   assert.ok(!(await bootstrap(peerHome)).groups.some(group => group.id === reGrant.room.id));
-  await assert.rejects(hostRestored.evaluate(() => window.pickdrop.leaveGroup()), /托管电脑/);
-  await assert.rejects(hostRestored.evaluate(() => window.pickdrop.forgetGroup()), /托管电脑/);
+  await assert.rejects(hostRestored.evaluate(() => window.pickdrop.leaveGroup()), /托管电脑|群主机/);
+  await assert.rejects(hostRestored.evaluate(() => window.pickdrop.forgetGroup()), /托管电脑|群主机/);
   assert.deepEqual(errors, []);
   const report = { nativeMultiWindow: true, liveNearbyRefresh: true, memberTokenRevoked: true, revokedMemberForget: true, onlineLeaveRevokesToken: true, hostLeaveProtected: true, groupIsolation: true, binaryTransfer: true, dropToGroup: true, shortCodeApproval: true, persistentGroups: true, hostRestartDiscovery: true, remoteCacheHashVerified: true, nativeDragIPC: true, edgeTabBounds: true, nonOverlappingTabs: true, pinKeepsExpanded: true, physicalOSDropTested: false, consoleErrors: errors };
   await writeFile(path.join(output, 'desktop-groups-smoke.json'), JSON.stringify(report, null, 2));

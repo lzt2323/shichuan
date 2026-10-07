@@ -18,7 +18,7 @@ export function createGroupPairing({ group, key, registerDevice, approveDevice, 
     if (!limit) { limit = { count: 0, until: now() + 60000 }; limits.set(ip, limit); }
     if (++limit.count > 10) throw fail(429, '尝试次数过多，请一分钟后重试');
   }
-  const publicRequest = request => ({ id: request.id, requestId: request.id, device: request.device, createdAt: request.createdAt, expiresAt: request.expiresAt, status: request.expiresAt <= now() ? 'expired' : request.status });
+  const publicRequest = request => ({ id: request.id, requestId: request.id, device: request.device, reset: Boolean(request.reset), createdAt: request.createdAt, expiresAt: request.expiresAt, status: request.status === 'approved' ? 'approved' : request.expiresAt <= now() ? 'expired' : request.status });
   return {
     probe(challenge, deviceId, requestedVersion) {
       if (typeof challenge !== 'string' || !/^[a-f0-9]{64}$/.test(challenge)) throw fail(400, '验证请求不正确');
@@ -36,14 +36,15 @@ export function createGroupPairing({ group, key, registerDevice, approveDevice, 
       const result = { code, expiresAt: now() + ttl };
       invites.set(code, result); return result;
     },
-    request(code, device, ip) {
+    request(code, device, ip, reset = false) {
       rate(ip);
       if (!uuid.test(device?.id) || typeof device?.name !== 'string' || !device.name.trim()) throw fail(400, '设备信息不正确');
-      if (authVersion() === 2 && hasDevice(device.id)) throw fail(409, '此设备已加入，请使用保存的连接信息');
+      const existing = authVersion() === 2 && hasDevice(device.id);
+      if (existing && !reset) throw fail(409, '此设备已加入，请使用保存的连接信息');
       const invite = invites.get(code);
       if (!invite || invite.expiresAt <= now()) throw fail(404, '邀请码无效或已过期');
       invites.delete(code); // Reserve exactly once, before waiting for approval.
-      const request = { id: randomUUID(), pollToken: randomBytes(32).toString('hex'), device: { id: device.id, name: device.name.trim().slice(0, 40), kind: ['desktop', 'ios', 'android', 'web'].includes(device.kind) ? device.kind : 'web' }, status: 'pending', createdAt: now(), expiresAt: now() + ttl };
+      const request = { id: randomUUID(), pollToken: randomBytes(32).toString('hex'), device: { id: device.id, name: device.name.trim().slice(0, 40), kind: ['desktop', 'ios', 'android', 'web'].includes(device.kind) ? device.kind : 'web' }, reset: Boolean(existing), status: 'pending', createdAt: now(), expiresAt: now() + ttl };
       requests.set(request.id, request); onRequestsChanged();
       return { status: 'pending', requestId: request.id, pollToken: request.pollToken, groupId: group.id, groupName: group.name, hostDeviceId: group.hostDeviceId, expiresAt: request.expiresAt };
     },
@@ -51,7 +52,7 @@ export function createGroupPairing({ group, key, registerDevice, approveDevice, 
       prune();
       const request = requests.get(id);
       if (!request || typeof token !== 'string' || token !== request.pollToken) { rate(ip); throw fail(404, '找不到加入申请'); }
-      const status = request.expiresAt <= now() ? 'expired' : request.status === 'approving' ? 'pending' : request.status;
+      const status = request.status === 'approved' ? 'approved' : request.expiresAt <= now() ? 'expired' : request.status === 'approving' ? 'pending' : request.status;
       if (status === 'approved' && authVersion() === 2 && !credentialFor(request.device.id, request.credential)) return { status: 'revoked' };
       return status === 'approved' ? { status, group: { ...group, authVersion: authVersion(), key: authVersion() === 2 ? request.credential : key } } : { status };
     },
@@ -67,7 +68,7 @@ export function createGroupPairing({ group, key, registerDevice, approveDevice, 
       if (typeof allow !== 'boolean') throw fail(400, '审批结果不正确');
       // Reserve the decision before asynchronous disk I/O to avoid concurrent approval races.
       request.status = allow ? 'approving' : 'denied';
-      try { if (allow) { request.credential = approveDevice ? await approveDevice(request.device, actorRequest) : (await registerDevice(request.device), key); request.status = 'approved'; } }
+      try { if (allow) { request.credential = approveDevice ? await approveDevice(request.device, actorRequest, request.reset) : (await registerDevice(request.device), key); request.status = 'approved'; } }
       catch (error) { request.status = 'pending'; throw error; }
       onRequestsChanged(); return { status: request.status };
     },
