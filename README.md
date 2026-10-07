@@ -8,19 +8,19 @@
 
 源码仓库：[lzt2323/shichuan](https://github.com/lzt2323/shichuan)。安装包统一从 [GitHub Releases](https://github.com/lzt2323/shichuan/releases) 下载；源码历史不包含安装包和用户数据。开发分支、检查和标签发布约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-## 0.5.0 全平台内测版
+## 0.5.1 全平台内测版
 
-新建群由各设备保存独立副本，创建者退出后其他在线成员继续文字与文件传输。历史文件按需从持有者获取，暂无在线副本时等待重试；Linux TUI 和 Android 原生客户端同步支持。旧群需在原托管设备显式升级，其他成员重新加入。另修复群管理、手动连接、圆角、动画及授权问题。完整说明见 [v0.5.0 发布说明](docs/releases/v0.5.0.md) 和 [协议与迁移](docs/peer-groups.md)。
+新建群由各设备保存独立副本，创建者退出后其他在线成员继续文字与文件传输。历史文件按需从持有者获取，暂无在线副本时等待重试；Linux TUI 和 Android 原生客户端同步支持。旧群需在原托管设备显式升级，其他成员重新加入。另修复群管理、手动连接、圆角、动画及授权问题。完整说明见 [v0.5.1 发布说明](docs/releases/v0.5.1.md) 和 [协议与迁移](docs/peer-groups.md)。
 
-安装包集中在 [v0.5.0 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.5.0)：
+安装包集中在 [v0.5.1 Release](https://github.com/lzt2323/shichuan/releases/tag/v0.5.1)：
 
 | 系统 | 文件 |
 | --- | --- |
-| Windows x64 | `PickDrop-0.5.0-Windows.exe` |
-| Mac Apple 芯片 | `PickDrop-0.5.0-Mac-AppleSilicon.zip` |
-| Android ARM64 | `PickDrop-0.5.0-Android-arm64-preview.apk` |
-| Linux x64 | `PickDrop-0.5.0-Linux-x64-TUI.tar.gz` |
-| Linux ARM64 | `PickDrop-0.5.0-Linux-arm64-TUI.tar.gz` |
+| Windows x64 | `PickDrop-0.5.1-Windows.exe` |
+| Mac Apple 芯片 | `PickDrop-0.5.1-Mac-AppleSilicon.zip` |
+| Android ARM64 | `PickDrop-0.5.1-Android-arm64-preview.apk` |
+| Linux x64 | `PickDrop-0.5.1-Linux-x64-TUI.tar.gz` |
+| Linux ARM64 | `PickDrop-0.5.1-Linux-arm64-TUI.tar.gz` |
 
 安装包自带运行资源，不需要 Node.js、Expo Go 或开发服务器。Linux 提供终端界面及命令行，可在 SSH 中使用；解压后运行包内 `pickdrop`，详细说明见 [Linux 使用指南](docs/linux.md)。暂不提供 Linux 图形窗口版、Intel Mac 包或 iOS IPA。
 
