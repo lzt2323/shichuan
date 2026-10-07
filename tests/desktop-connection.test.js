@@ -24,7 +24,7 @@ function fixture(fetchImpl = async () => ({ ok: true, json: async () => ({ messa
     applyState(next) { states.push(next); },
     connection(value) { context.isOnline = value; }, renderConnection() {},
   });
-  vm.runInContext(`let epoch=0, reconnectTimer, socket, reconnectAttempt=0, connectionError='';
+  vm.runInContext(`let historyLoaded=false; let epoch=0, reconnectTimer, socket, reconnectAttempt=0, connectionError='';
     let requestController=new AbortController(); const ready=new Map(), prepareQueue=[];
     let config={room:{baseUrl:'http://192.168.1.2:47321',key:'token'},device:{id:'test'}};
     ${apiCode}\n${joinCode}\nglobalThis.inspect=()=>({epoch,reconnectAttempt,connectionError});`, context);

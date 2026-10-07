@@ -10,7 +10,7 @@ import { PickDropScreen, chatViewport, modeLines } from './view.js';
 import { NavigationScreen, messageDetailText } from './navigation-view.js';
 import { fileSize } from '../../shared/protocol.js';
 const h = React.createElement;
-const actions = [ ['create', '创建一个传输群'], ['nearby', '发现附近的群'], ['join', '粘贴邀请链接'], ['invite', '邀请手机 / 电脑加入'], ['groups', '切换传输群'], ['files', '选择文件发送'], ['downloads', '下载群内文件'], ['requests', '处理加入申请'], ['tasks', '传输进度 / 取消 / 重试'], ['devices', '查看当前群设备'], ['networks', '选择传输网络'], ['help', '帮助与快捷键'], ['quit', '退出界面'] ];
+const actions = [ ['create', '创建一个传输群'], ['nearby', '发现附近的群'], ['join', '粘贴邀请链接'], ['invite', '邀请手机 / 电脑加入'], ['groups', '切换传输群'], ['files', '选择文件发送'], ['downloads', '下载群内文件'], ['requests', '处理加入申请'], ['tasks', '传输进度 / 取消 / 重试'], ['devices', '查看当前群设备'], ['networks', '选择传输网络'], ['history', '加载更早的消息'], ['help', '帮助与快捷键'], ['quit', '退出界面'] ];
 
 export function App({ persistent = false, request = rpc, initialSnapshot, refreshInterval = 750, onDaemonStopped }) {
   const { exit } = useApp(), { stdout } = useStdout();
@@ -55,6 +55,7 @@ export function App({ persistent = false, request = rpc, initialSnapshot, refres
     if (name === 'networks') { const net = await request('networks'); return showMenu(name, [{ selection: { mode: 'auto' }, label: '自动选择 · 推荐' }, ...net.interfaces.map(n => ({ selection: { mode: 'manual', interfaceName: n.name, address: n.address }, label: `${n.name} · ${n.address}${n.virtual ? ' · 虚拟网卡' : ''}` }))]); }
     if (name === 'files') { setSelected([]); return browse(process.cwd() + '/'); }
     if (!current) throw new Error('请先创建或加入一个群');
+    if (name === 'history') { const state = await request('history', { group: current.id }); revision.current++; setSnapshot(previous => ({ ...previous, state })); setMode('chat'); setNotice(state.history?.hasMore ? '已加载更早的消息；在最早消息处按 ↑ 可继续加载。' : '已加载全部可用消息'); return; }
     if (name === 'invite') { const invite = await request('invite', { group: current.id }); if (!invite.link) throw new Error('没有可用的局域网地址，请选择传输网络'); setTarget(invite); setQr(await QRCode.toString(invite.link, { type: 'utf8', margin: 4 })); setMode('invite'); return; }
     if (name === 'devices') return showMenu(name, snapshot.state.devices.map(d => ({ ...d, label: `${d.online ? '● 在线' : '○ 离线'} · ${d.name}${d.id === snapshot.device?.id ? ' · 本机' : ''}` })));
     if (name === 'downloads') return showMenu(name, snapshot.state.messages.filter(m => m.type === 'file').reverse().map(m => ({ ...m, label: `${m.fileName} · ${fileSize(m.size)}` })));
@@ -67,7 +68,7 @@ export function App({ persistent = false, request = rpc, initialSnapshot, refres
     else if (mode === 'create') { const created = await request('create', { name: input }); groupRef.current = created.id; setGroup(created.id); setSnapshot(previous => ({ ...previous, selectedGroupId: created.id, groups: [...previous.groups.filter(g => g.id !== created.id), created], state: { messages: [], devices: [] }, requests: [] })); setMode('chat'); setInput(''); setNotice('群已创建，Ctrl+P → 邀请设备加入'); }
     else if (mode === 'join' || mode === 'code') { await request('join', mode === 'join' ? { link: input } : { address: target.baseUrl, code: input, expectedGroupId: target.groupId }); setMode('chat'); setInput(''); setNotice('加入申请已发出，等待群成员批准；批准后在切换群中打开。'); }
     else if (mode === 'settings') { const preferences = await request('preferences', { downloadDirectory: expandPath(input) }); revision.current++; setSnapshot(previous => ({ ...previous, preferences })); setMode('workspace'); setNotice('保存位置已记住，下次下载默认使用此目录'); }
-    else if (mode === 'destination') { const directory = expandPath(input); const tasks = await request('receive', { group: current.id, messageId: target.id, directory }); revision.current++; setSnapshot(previous => ({ ...previous, preferences: { ...previous.preferences, downloadDirectory: directory }, transfers: [...previous.transfers, ...tasks.map(task => ({ type: 'download', groupId: current.id, messageId: target.id, name: target.fileName, status: 'queued', bytes: 0, total: target.size, ...task }))] })); setMode('chat'); setInput(''); setNotice(`已加入下载队列（${tasks.length} 个），完成后校验 SHA-256`); }
+    else if (mode === 'destination') { const directory = expandPath(input); const tasks = await request('receive', { group: current.id, messageId: target.id, directory }); revision.current++; setSnapshot(previous => ({ ...previous, preferences: { ...previous.preferences, downloadDirectory: directory }, transfers: [...previous.transfers, ...tasks.map(task => ({ type: 'download', groupId: current.id, messageId: target.id, name: target.fileName, status: 'queued', bytes: 0, total: target.size, ...task }))] })); setMode('chat'); setInput(''); setNotice(`已加入下载队列（${tasks.length} 个）`); }
     else {
       const item = items[index]; if (!item) return;
       if (mode === 'task-actions') { await request(item.id, { id: target.id }); return open('tasks'); }
@@ -97,7 +98,7 @@ export function App({ persistent = false, request = rpc, initialSnapshot, refres
     if (task && ['queued', 'running'].includes(task.status)) { setNotice('此文件已在下载队列中'); return; }
     if (task?.status === 'done') { setNotice(`已保存：${task.result || snapshot.preferences?.downloadDirectory || ''}`); setMode('message-detail'); setOffset(0); return; }
     if (task && ['failed', 'cancelled'].includes(task.status)) { await request('retry', { id: task.id }); setNotice('已重新加入下载队列'); }
-    else { const tasks = await request('receive', { group: current.id, messageId: message.id, directory: snapshot.preferences?.downloadDirectory || path.join(os.homedir(), 'Downloads', '拾传') }); revision.current++; setSnapshot(previous => ({ ...previous, transfers: [...previous.transfers, ...tasks.map(task => ({ type: 'download', groupId: current.id, messageId: message.id, name: message.fileName, status: 'queued', bytes: 0, total: message.size, ...task }))] })); setNotice('已加入下载队列，完成后校验 SHA-256'); }
+    else { const tasks = await request('receive', { group: current.id, messageId: message.id, directory: snapshot.preferences?.downloadDirectory || path.join(os.homedir(), 'Downloads', '拾传') }); revision.current++; setSnapshot(previous => ({ ...previous, transfers: [...previous.transfers, ...tasks.map(task => ({ type: 'download', groupId: current.id, messageId: message.id, name: message.fileName, status: 'queued', bytes: 0, total: message.size, ...task }))] })); setNotice('已加入下载队列'); }
     setMode('chat');
   };
   useInput((value, key) => {
@@ -115,6 +116,7 @@ export function App({ persistent = false, request = rpc, initialSnapshot, refres
     if (mode === 'chat') {
       if (key.leftArrow) { enterWorkspace(); return; }
       if (key.rightArrow || key.return) { if (message) { setActionIndex(0); setMode('message-actions'); } return; }
+      if ((key.upArrow || key.pageUp) && messageIndex === 0 && snapshot.state.history?.hasMore) { void run(() => open('history')); return; }
       if (key.upArrow || key.downArrow || key.pageUp || key.pageDown) { const jump = key.pageUp || key.pageDown ? Math.max(1, Math.floor((height - 10) / 3)) : 1; const next = Math.max(0, Math.min(messages.length - 1, messageIndex + (key.upArrow || key.pageUp ? -jump : jump))); if (messages[next]) setMessageIds(previous => ({ ...previous, [current.id]: messages[next].id })); return; }
       return;
     }

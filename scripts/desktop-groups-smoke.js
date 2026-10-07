@@ -107,6 +107,10 @@ try {
   await work.locator('[data-action=approve-join]').waitFor({ timeout: 15000 });
   await work.locator('[data-action=approve-join]').click();
   const peerWork = await pageFor(peerApp, workConfig.group.id); await connected(peerWork);
+  await peerWork.getByText('群文件隔离.bin', {exact:true}).waitFor();
+  assert.equal(await peerWork.locator('.file-bubble[draggable=true]').count(), 0, 'Joining a group must not fetch old attachments');
+  await peerWork.locator('.file-more summary').first().click();
+  await peerWork.getByRole('button', {name:'接收到本机',exact:true}).click();
   await peerWork.locator('.file-bubble[draggable=true]').waitFor({ timeout: 15000 });
   assert.equal((await bootstrap(peerHome)).group.id, (await bootstrap(peerHome)).groups.find(group => group.local).id);
   assert.ok(!(await snapshot(peerHome)).state.messages.some(message => message.text === '只发送到工作资料群'));
@@ -132,7 +136,7 @@ try {
   await work.locator('#dock-button').click();
   await settled(work);
   await settled(work, true);
-  assert.equal((await bounds(hostApp, '工作资料')).width, 12);
+  assert.equal((await bounds(hostApp, '工作资料')).width, 40);
   await work.screenshot({ path: path.join(output, 'group-edge-halfball.png') });
   await work.locator('#pickdrop-native-tab').click(); await settled(work, false);
   assert.equal((await bounds(hostApp, '工作资料')).width, 340);
@@ -197,6 +201,7 @@ try {
   const report = { nativeMultiWindow: true, liveNearbyRefresh: true, memberTokenRevoked: true, revokedMemberForget: true, onlineLeaveRevokesToken: true, hostLeaveProtected: true, groupIsolation: true, binaryTransfer: true, dropToGroup: true, shortCodeApproval: true, persistentGroups: true, hostRestartDiscovery: true, remoteCacheHashVerified: true, nativeDragIPC: true, edgeTabBounds: true, nonOverlappingTabs: true, pinKeepsExpanded: true, physicalOSDropTested: false, consoleErrors: errors };
   await writeFile(path.join(output, 'desktop-groups-smoke.json'), JSON.stringify(report, null, 2));
   console.log('Desktop groups smoke passed: independent apps/groups, live nearby discovery, pairing, file drag/cache, restart recovery, member revocation, forget/leave and host protection.');
+} catch (error) { console.error('Desktop groups smoke failed:', error); throw error;
 } finally {
   if (peerApp) await peerApp.close().catch(() => {});
   if (hostApp) await hostApp.close().catch(() => {});

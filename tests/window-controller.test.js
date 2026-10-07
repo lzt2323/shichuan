@@ -45,7 +45,7 @@ test('holding near an edge never snaps or collapses; release commits docking', t
   assert.equal(c.state().edge, 'right');
   assert.equal(win.getBounds().x, 1120);
   cursor({ x: 200, y: 200 }); c.pointer(false); tick(900); tick(200);
-  assert.equal(win.getBounds().width, 12);
+  assert.equal(win.getBounds().width, 40);
 });
 
 test('a collapsed tab pulls out under the grabbed edge and stays free on release', t => {
@@ -66,13 +66,13 @@ test('motion is interruptible, pinned windows stay expanded, reduced motion is i
   const { controller: c, win, cursor, tick } = setup(t);
   dockRight(c, win); tick(64);
   assert.equal(c.state().transition, 'collapse');
-  assert.ok(win.getBounds().width < 320 && win.getBounds().width > 12);
+  assert.ok(win.getBounds().width < 320 && win.getBounds().width > 40);
   c.expand(); tick(200);
   assert.equal(win.getBounds().width, 320);
   c.setPinned(true); cursor({ x: 100, y: 700 }); c.pointer(false); tick(2000);
   assert.equal(c.state().collapsed, false);
   c.setReducedMotion(true); c.setPinned(false); c.dock();
-  assert.equal(win.getBounds().width, 12);
+  assert.equal(win.getBounds().width, 40);
   assert.equal(c.state().transition, '');
   c.expand(); assert.equal(win.getBounds().width, 320);
 });
@@ -137,7 +137,7 @@ test('top docking waits for release, uses the work area, and preserves full boun
   assert.equal(c.state().candidateEdge, 'top'); assert.equal(c.state().edge, null);
   c.endWindowDrag(); tick(200); assert.equal(c.state().edge, 'top'); assert.equal(win.getBounds().y, 30);
   c.setReducedMotion(true); c.dock();
-  const ball = win.getBounds(); assert.equal(ball.width, 24); assert.equal(ball.height, 12); assert.equal(ball.y, 30);
+  const ball = win.getBounds(); assert.equal(ball.width, 64); assert.equal(ball.height, 34); assert.equal(ball.y, 30);
   cursor({ x: ball.x + 12, y: ball.y + 6 }); c.startWindowDrag();
   cursor({ x: ball.x + 112, y: ball.y + 106 }); tick(16); c.endWindowDrag();
   assert.equal(c.state().collapsed, false); assert.equal(c.state().edge, null);
@@ -150,7 +150,7 @@ test('multiple group balls on the top edge remain separate and retain independen
   const { controller: b, win: two } = makeWindow();
   a.setReducedMotion(true); b.setReducedMotion(true); a.dock(); b.dock(); tick(200);
   assert.equal(a.state().edge, 'top'); assert.equal(b.state().edge, 'top');
-  assert.ok(one.getBounds().x + 24 <= two.getBounds().x || two.getBounds().x + 24 <= one.getBounds().x);
+  assert.ok(one.getBounds().x + 64 <= two.getBounds().x || two.getBounds().x + 64 <= one.getBounds().x);
   a.expand(); b.expand(); assert.equal(one.getBounds().width, 320); assert.equal(two.getBounds().width, 320);
 });
 
@@ -166,7 +166,7 @@ test('custom resize keeps a transparent window usable and respects minimum dimen
 test('hide and reduced-motion changes settle an in-flight transition instead of leaving a fragment', t => {
   const { controller: c, win, tick } = setup(t);
   dockRight(c, win); tick(48); win.hide();
-  assert.equal(c.state().transition, ''); assert.equal(win.getBounds().width, 12); assert.equal(win.getBounds().height, 24);
+  assert.equal(c.state().transition, ''); assert.equal(win.getBounds().width, 40); assert.equal(win.getBounds().height, 48);
   win.show(); c.expand(); tick(32); c.setReducedMotion(true);
   assert.equal(c.state().transition, ''); assert.equal(win.getBounds().width, 320);
 });
@@ -174,7 +174,39 @@ test('hide and reduced-motion changes settle an in-flight transition instead of 
 test('saved top docking restores as a small hemisphere, while pinned state stays expanded', t => {
   const { makeWindow } = setup(t);
   const { controller: c, win } = makeWindow(undefined, { edge: 'top', collapsed: true });
-  c.setReducedMotion(true); c.restore(); assert.equal(win.getBounds().width, 24); assert.equal(win.getBounds().height, 12);
+  c.setReducedMotion(true); c.restore(); assert.equal(win.getBounds().width, 64); assert.equal(win.getBounds().height, 34);
   const pinned = makeWindow(undefined, { edge: 'top', collapsed: true, pinned: true });
   pinned.controller.setReducedMotion(true); pinned.controller.restore(); assert.equal(pinned.win.getBounds().width, 320);
+});
+
+
+test('blur before released-pointer IPC still commits a completed edge drag', t => {
+  const { controller: c, win, cursor, tick } = setup(t);
+  c.startWindowDrag(); cursor({ x: 1160, y: 120 }); tick(16);
+  win.emit('blur'); tick(16); c.endWindowDrag();
+  cursor({ x: 200, y: 200 }); tick(1300);
+  assert.equal(c.state().edge, 'right'); assert.equal(c.state().collapsed, true);
+});
+test('a genuinely interrupted held drag stays detached after blur', t => {
+  const { controller: c, win, cursor, tick } = setup(t);
+  c.startWindowDrag(); cursor({ x: 1160, y: 120 }); tick(16);
+  win.emit('blur'); tick(1000);
+  assert.equal(c.state().edge, null); assert.equal(c.state().moving, false);
+});
+test('blur releases focus locks but preserves pin and native-operation protection', t => {
+  const { controller: c, win, cursor, tick } = setup(t);
+  c.startWindowDrag(); cursor({ x: 1160, y: 120 }); tick(16); c.endWindowDrag(); tick(200);
+  c.setBusy('ui', true); c.setBusy('input', true); win.emit('blur');
+  c.setBusy('ui', true); c.setBusy('input', true); cursor({ x: 200, y: 200 }); tick(1300);
+  assert.equal(c.state().collapsed, true);
+  c.expand(); c.setBusy('native', true); tick(1300); assert.equal(c.state().collapsed, false);
+  c.setBusy('native', false); c.setPinned(true); tick(1300); assert.equal(c.state().collapsed, false);
+  c.setPinned(false); tick(1300); assert.equal(c.state().collapsed, true);
+});
+test('dragging files makes the courier reach before expanding without focusing', t => {
+  const { controller: c, win, tick } = setup(t); let focusCalls = 0; win.focus = () => focusCalls++;
+  c.setReducedMotion(true); dockRight(c, win); c.dragActivity(true);
+  assert.equal(c.state().accepting, true); assert.equal(c.state().collapsed, true);
+  tick(144); assert.equal(c.state().collapsed, false); assert.equal(focusCalls, 0);
+  c.dragActivity(false); assert.equal(c.state().accepting, false);
 });

@@ -7,7 +7,7 @@ export function byteProgress(bytes, total) {
 
 export function assertFileMetadata(message) {
   if (!message || typeof message.id !== 'string' || !message.id || !Number.isSafeInteger(message.size) || message.size < 0 || !/^[a-f0-9]{64}$/i.test(message.sha256 || '')) {
-    throw new Error('文件校验信息不完整，请刷新群消息后重试');
+    throw new Error('文件信息不完整，请刷新群消息后重试');
   }
 }
 

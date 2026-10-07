@@ -9,6 +9,7 @@ import WebSocket from 'ws';
 const dir = await mkdtemp(path.join(tmpdir(), 'pickdrop-visual-'));
 const app = await electron.launch({ args: ['.'], env: { ...process.env, PICKDROP_USER_DATA: dir } });
 const peers = [], errors = [];
+app.process().stderr?.on('data', chunk => { const line = chunk.toString(); if (/Error|Exception|finalized/.test(line)) console.error('Electron stderr:', line); });
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 try {
   const home = await app.firstWindow();
@@ -51,7 +52,7 @@ try {
   await page.getByText('收到，直接拖走就行', { exact: true }).waitFor();
   await pause(250);
   await mkdir('artifacts', { recursive: true });
-  await page.screenshot({ path: 'artifacts/group-transfer-desktop.png', omitBackground: true });
+  await page.screenshot({ animations:'disabled', path: 'artifacts/group-transfer-desktop.png', omitBackground: true });
   assert.equal(await page.locator('.message').count(), 5);
   const layout = await page.evaluate(() => ({
     horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
@@ -74,7 +75,7 @@ try {
     const win = BrowserWindow.getAllWindows().find(w => w.getTitle() === '项目传输群 · 拾传'); win.setBounds({ width: 280, height: 340 });
   });
   await pause(250);
-  await page.screenshot({ path: 'artifacts/group-transfer-minimum.png', omitBackground: true });
+  await page.screenshot({ animations:'disabled', path: 'artifacts/group-transfer-minimum.png', omitBackground: true });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert.ok(await page.locator('#send-text').isVisible());
   await page.locator('#message-input').fill('小窗口也能发送');
@@ -94,7 +95,7 @@ try {
   await page.locator('#invite-members').click();
   await page.locator('.invite-qr').waitFor();
   assert.ok(await page.locator('.invite-qr').evaluate(image => image.complete && image.naturalWidth > 0));
-  await page.screenshot({ path: 'artifacts/mobile-invite-desktop.png', omitBackground: true });
+  await page.screenshot({ animations:'disabled', path: 'artifacts/mobile-invite-desktop.png', omitBackground: true });
   await page.locator('#close-panel').click();
   // A user can inspect and explicitly select the real LAN in the smallest UI.
   await page.locator('#group-menu-button').click();
@@ -107,7 +108,7 @@ try {
   await page.waitForFunction(async () => (await window.pickdrop.getNetwork()).selection.mode === 'manual');
   await page.waitForFunction(() => document.querySelector('#connection-status')?.dataset.connected === 'true');
   await page.locator('#panel-body').evaluate(node => { node.scrollTop = 0; });
-  await page.screenshot({ path: 'artifacts/desktop-network-settings.png', omitBackground: true });
+  await page.screenshot({ animations:'disabled', path: 'artifacts/desktop-network-settings.png', omitBackground: true });
   assert.ok(await page.locator('#close-panel').isVisible());
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.locator('input[name="pickdrop-network"][value="auto"]').check();
@@ -118,10 +119,44 @@ try {
   await page.locator('#message-input').fill('切换网络后继续传输');
   await page.locator('#send-text').click();
   await page.getByText('切换网络后继续传输', { exact: true }).waitFor();
+  // Member controls reserve room for horizontal status text, including at 280px.
+  await api('/api/join', zhou, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({id:zhou,name:'小周的 Android 手机 · 家庭 Wi-Fi',kind:'android'})});
+  await page.locator('#members-button').click();
+  await page.locator('.device strong').filter({hasText:'小周的 Android 手机'}).waitFor();
+  await page.locator('.member-remove').first().waitFor();
+  const memberLayout = await page.locator('.device').evaluateAll(rows => rows.map(row => ({
+    width: row.querySelector('.device-details').getBoundingClientRect().width,
+    statusHeight: row.querySelector('small').getBoundingClientRect().height,
+    writingMode: getComputedStyle(row.querySelector('small')).writingMode,
+  })));
+  assert.ok(memberLayout.every(row => row.width > 100 && row.statusHeight < 40 && row.writingMode === 'horizontal-tb'));
+  await page.screenshot({ animations:'disabled', path: 'artifacts/desktop-members-minimum.png', omitBackground: true });
+  await page.locator('#close-panel').click();
+  // Settings use the real native storage IPC; opening the panel never deletes data.
+  await page.locator('#group-menu-button').click(); await page.locator('#storage-settings').click();
+  await page.locator('.storage-stat').first().waitFor();
+  assert.equal(await page.locator('.storage-file').count(), 3);
+  await page.screenshot({ animations:'disabled', path: 'artifacts/desktop-storage-minimum.png', omitBackground: true });
+  await page.locator('#close-panel').click();
+  // A reconnect starts with the bounded recent page; older records are fetched explicitly.
+  for (let index = 0; index < 105; index++) await text(device.id, `历史分页验证 ${index}`);
+  await page.evaluate(() => window.pickdrop.setNetwork({mode:'auto'}));
+  await page.waitForFunction(() => document.querySelector('#connection-status')?.dataset.connected === 'true');
+  await page.locator('.history-load').waitFor();
+  await page.locator('.history-load').click();
+  await page.getByText('收到，直接拖走就行', { exact:true }).waitFor();
+  await page.locator('.history-latest').click();
+  await page.getByText('历史分页验证 104', {exact:true}).waitFor();
   assert.deepEqual(errors, []);
   await writeFile('artifacts/desktop-visual-smoke.json', JSON.stringify({ realBackendMessages: true, distinctSenders: true, fixtureData: true, menuSurvivesPresenceUpdate: true, keyboardMenuDismissal: true, minimumSizeUsable: true, layout, errors }, null, 2));
   console.log('Desktop visual smoke passed: actual shared conversation, distinct senders, minimum layout, mobile invitation QR, screenshots.');
+} catch (error) {
+  console.error('Desktop smoke failed:', error); throw error;
 } finally {
   for (const peer of peers) peer.terminate();
-  await app.close(); await rm(dir, { recursive: true, force: true });
+  const closing = app.close();
+  let shutdownTimedOut = false;
+  const timeout = setTimeout(() => { shutdownTimedOut = true; console.error('Electron graceful shutdown exceeded 5 seconds'); app.process().kill('SIGKILL'); }, 5000);
+  try { await closing; } finally { clearTimeout(timeout); await rm(dir, { recursive: true, force: true }); }
+  assert.equal(shutdownTimedOut, false, 'Electron must shut down gracefully');
 }

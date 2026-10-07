@@ -2,7 +2,7 @@
 // Run: node scripts/generate-brand-assets.js
 // If sharp is not resolvable, set PICKDROP_SHARP_MODULE to its absolute module path.
 // The geometry below is original vector artwork redrawn from the approved concept.
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, copyFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -38,6 +38,7 @@ const variants = [
   { name: 'mark', body: symbol(colors.teal, colors.mint), title: 'PickDrop 拾传 · 拾点彩色标志', sizes: [1024] },
   { name: 'mark-mono', body: symbol('#000000'), title: 'PickDrop 拾传 · 拾点单色标志', sizes: [1024] },
   { name: 'app-icon', body: `<rect x="0" y="0" width="512" height="512" rx="112" fill="${colors.teal}"/>${symbol(colors.ivory, colors.ivory, 0.84)}`, title: 'PickDrop 拾传 · 应用图标', sizes: [1024, 512, 256, 128, 64, 32, 16] },
+  { name: 'mac-icon', body: `<rect x="46" y="48" width="420" height="420" rx="92" fill="#123F35" opacity=".12"/><g transform="translate(256 256) scale(.82) translate(-256 -256)"><rect width="512" height="512" rx="112" fill="${colors.teal}"/>${symbol(colors.ivory, colors.ivory, 0.84)}</g>`, title: 'PickDrop 拾传 · macOS 图标', sizes: [1024, 512, 256, 128, 64, 32, 16] },
   { name: 'mobile-icon', body: `<rect width="512" height="512" fill="${colors.teal}"/>${symbol(colors.ivory, colors.ivory, 0.84)}`, title: 'PickDrop 拾传 · 移动应用图标', sizes: [1024] },
   { name: 'adaptive-foreground', body: symbol(colors.ivory, colors.ivory, 0.63), title: 'PickDrop 拾传 · Android 自适应图标前景', sizes: [1024] },
   { name: 'monochrome-icon', body: symbol('#FFFFFF', '#FFFFFF', 0.63), title: 'PickDrop 拾传 · Android 主题图标', sizes: [1024] },
@@ -59,4 +60,5 @@ const variants = [
   }
   await writeFile(path.join(output, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 }
+await copyFile(path.join(output, 'mac-icon.png'), path.join(root, 'apps/desktop/assets/mac-icon.png'));
 console.log(`Generated PickDrop brand assets in ${output}`);

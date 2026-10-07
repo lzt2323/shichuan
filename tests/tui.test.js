@@ -56,7 +56,7 @@ test('download checksum mismatch removes partial and never publishes corrupt byt
   const stored = daemon.manager.getHostedInbox(group.id).fileFor(message.id).path;
   await fs.writeFile(stored, 'corrupt');
   const directory = path.join(root, 'bad'); const [failed] = await done(call, await call('receive', { group: group.id, messageId: message.id, directory }));
-  assert.equal(failed.status, 'failed'); assert.match(failed.error, /SHA-256/); assert.deepEqual(await fs.readdir(directory), []);
+  assert.equal(failed.status, 'failed'); assert.match(failed.error, /文件内容不完整/); assert.deepEqual(await fs.readdir(directory), []);
   await fs.writeFile(stored, 'correct'); await call('retry', { id: failed.id }); const [retried] = await done(call, [{ id: failed.id }]); assert.equal(retried.status, 'done');
   const queued = new TransferQueue({ manager: daemon.manager, fetchState: () => {} }); queued.running = true;
   const task = queued.add('upload', group.id, { source }); queued.cancel(task.id); assert.equal(queued.list()[0].status, 'cancelled'); queued.running = false; await queued.close();
@@ -120,4 +120,48 @@ test('compact progress bar preserves percentages on narrow terminals', async () 
   assert.match(progressLabel({ bytes: 68, total: 100, status: 'running' }, 80), /█.*░.*68%/);
   assert.equal(progressLabel({ bytes: 68, total: 100, status: 'running' }, 12), '68%');
   assert.equal(progressLabel({ bytes: 0, total: 0, status: 'queued' }, 12), '等待');
+});
+
+test('TUI paginates older history, receives an old file by ID and bulk receive traverses every page', async t => {
+  const { root, daemon, call } = await fixture(t), group = await call('create', { name: '历史分页' });
+  const first = path.join(root, 'old.bin'), latest = path.join(root, 'latest.bin');
+  await fs.writeFile(first, 'old'); await fs.writeFile(latest, 'latest');
+  const [oldUpload] = await done(call, await call('send', { group: group.id, files: [first] }));
+  assert.equal(oldUpload.status, 'done', oldUpload.error);
+  for (let n = 0; n < 105; n++) await call('text', { group: group.id, text: `消息 ${n}` });
+  const [newUpload] = await done(call, await call('send', { group: group.id, files: [latest] }));
+  assert.equal(newUpload.status, 'done', newUpload.error);
+  const recent = await call('messages', { group: group.id });
+  assert.equal(recent.messages.length, 100); assert.equal(recent.history.hasMore, true);
+  assert.equal(recent.messages.some(m => m.id === oldUpload.messageId), false);
+  const earlier = await call('messages', { group: group.id, before: recent.history.before });
+  assert.equal(earlier.messages.length, 7); assert.equal(earlier.history.hasMore, false);
+  assert.equal(earlier.messages[0].id, oldUpload.messageId);
+  await assert.rejects(call('messages', { group: group.id, before: '-1' }), /游标/);
+  const directory = path.join(root, 'paged-downloads');
+  const [single] = await done(call, await call('receive', { group: group.id, messageId: oldUpload.messageId, directory }));
+  assert.equal(single.status, 'done', single.error);
+  assert.equal(await fs.readFile(single.result, 'utf8'), 'old');
+  const tasks = await call('receive', { group: group.id, all: true, directory });
+  assert.equal(tasks.length, 1, 'bulk receive occupies one queue entry');
+  const [bulk] = await done(call, tasks);
+  assert.equal(bulk.status, 'done', bulk.error); assert.equal(bulk.completedFiles, 2);
+  assert.equal(await fs.readFile(path.join(directory, 'old (1).bin'), 'utf8'), 'old');
+  assert.equal(await fs.readFile(path.join(directory, 'latest.bin'), 'utf8'), 'latest');
+  for (let n = 0; n < 100; n++) {
+    const snapshot = await call('snapshot', { group: group.id });
+    if (snapshot.state.history?.total === 107) break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  const loaded = await call('history', { group: group.id });
+  assert.equal(loaded.messages.length, 107); assert.equal(loaded.history.hasMore, false);
+  await call('text', { group: group.id, text: '实时新消息' });
+  for (let n = 0; n < 100; n++) {
+    const snapshot = await call('snapshot', { group: group.id });
+    if (snapshot.state.messages.at(-1)?.text === '实时新消息') {
+      assert.equal(snapshot.state.messages.length, 108); return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.fail('delta stream did not update the opened history');
 });

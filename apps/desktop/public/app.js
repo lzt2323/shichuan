@@ -1,4 +1,5 @@
 import { parseRoomLink, fileSize } from '/protocol.js';
+import { mergeState, prependHistory } from '/history.js';
 import { ImageDrafts, createImagePasteHandler } from '/clipboard-images.js';
 
 const $ = id => document.getElementById(id);
@@ -9,7 +10,9 @@ let pendingTicket, pendingTimer, requestsLoading = false, groupsLoading = false,
 let state = { messages: [], devices: [] }, groups = [], requests = [], online = false, panelKind = '', inviteTimer;
 const ready = new Map(), prepareQueue = [];
 const imageDrafts = new ImageDrafts();
-let sendingComposer = false;
+let sendingComposer = false, historyLoaded = false, readingHistory = false;
+const observedFiles = new Set();
+const AUTO_RECEIVE_BYTES = 8 * 1024 ** 2;
 const messageNodes = new Map();
 const element = (tag, className, text) => {
   const node = document.createElement(tag); if (className) node.className = className;
@@ -22,8 +25,9 @@ function action(label, callback, className = '', id = '') {
   button.addEventListener('click', event => { event.stopPropagation(); Promise.resolve().then(callback).catch(showError); }); return button;
 }
 function busy() {
-  const inputFocused = ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
-  bridge?.setInteractionBusy?.(Boolean($('panel').open || !$('group-menu').hidden || inputFocused || document.querySelector('.file-more[open]') || dropDepth || uploading || imageDrafts.items.length));
+  const focused = document.hasFocus();
+  const inputFocused = focused && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
+  bridge?.setInteractionBusy?.(Boolean(dropDepth || focused && ($('panel').open || !$('group-menu').hidden || inputFocused || document.querySelector('.file-more[open]'))));
 }
 function groupName() { return config?.room?.name || '我的文件'; }
 function connection(value) { online = value; renderConnection(); }
@@ -46,7 +50,7 @@ async function api(route, options = {}) {
   const result = await response.json(); if (!response.ok) throw Object.assign(new Error(result.error || '操作失败'), { status: response.status }); return result;
 }
 function time(date) { return new Date(date).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }); }
-function statusFor(message) { return ready.get(message.id) === true ? '可拖出' : ready.get(message.id) === 'error' ? '接收失败' : '接收中'; }
+function statusFor(message) { if (message.deleted) return '主机文件已清理'; return ready.get(message.id) === true ? '可拖出' : ready.get(message.id) === 'error' ? '接收失败' : ready.get(message.id) === 'loading' ? '接收中' : '点按接收'; }
 function hydrate() {
   while (preparing < 2 && prepareQueue.length) {
     const { id, generation } = prepareQueue.shift(); if (generation !== epoch) continue;
@@ -55,10 +59,16 @@ function hydrate() {
   }
 }
 function applyState(next) {
-  state = { ...next, messages: next.messages || [], devices: next.devices || [] };
-  if (bridge) for (const message of state.messages) if (message.type === 'file' && !ready.has(message.id)) {
-    ready.set(message.id, 'loading'); prepareQueue.push({ id: message.id, generation: epoch });
+  state = mergeState(state, next);
+  if (bridge) for (const message of state.messages) if (message.type === 'file' && !message.deleted) {
+    const isNew = historyLoaded && !observedFiles.has(message.id);
+    observedFiles.add(message.id);
+    if (isNew && Number.isSafeInteger(message.size) && message.size <= AUTO_RECEIVE_BYTES && !ready.has(message.id)) {
+      ready.set(message.id, 'loading'); prepareQueue.push({ id: message.id, generation: epoch });
+    }
   }
+  while (observedFiles.size > 1000) observedFiles.delete(observedFiles.values().next().value);
+  historyLoaded = true;
   hydrate(); renderDevices(); renderMessages();
 }
 function renderDevices() {
@@ -77,10 +87,10 @@ function renderDevices() {
   list.replaceChildren(...state.devices.map(device => {
     const row = element('div', 'device'); row.append(element('div', 'device-avatar', device.kind === 'desktop' ? '▱' : '▯'));
     const details = element('div', 'device-details'); details.append(element('strong', '', device.name + (device.id === config.device.id ? ' · 本机' : '')));
-    const status = element('small'); status.append(element('i', `online-dot ${device.online ? '' : 'offline-dot'}`), document.createTextNode(device.online ? '在线' : '离线 · 加入关系已保存'));
+    const status = element('small'); status.append(element('i', `online-dot ${device.online ? '' : 'offline-dot'}`), document.createTextNode(device.online ? '在线' : '离线'));
     details.append(status); row.append(details);
     if (bridge?.removeMember && config.room.local && Number(config.room.authVersion) === 2 && device.id !== config.room.hostDeviceId && device.id !== config.device.id) {
-      const remove = action('移除', () => confirmOperation('移除此设备', `移除「${device.name}」后，其连接和访问授权会被撤销，需要重新申请加入。`, async () => { await bridge.removeMember(device.id); openMembers(); toast('设备已移除，访问授权已撤销'); }), 'secondary-button');
+      const remove = action('移除', () => confirmOperation('移除此设备', `移除「${device.name}」后，其连接和访问授权会被撤销，需要重新申请加入。`, async () => { await bridge.removeMember(device.id); openMembers(); toast('设备已移除，访问授权已撤销'); }), 'member-remove');
       remove.dataset.removeDevice = device.id; row.append(remove);
     }
     return row;
@@ -114,6 +124,7 @@ function createMessage(message, animate) {
     const menu = element('div', 'file-action-menu');
     const menuAction = (label, callback, className = '') => action(label, () => { more.open = false; summary.focus({ preventScroll: true }); return callback(); }, className);
     if (bridge) {
+      menu.append(menuAction('接收到本机', () => { ready.set(message.id, 'loading'); prepareQueue.push({ id: message.id, generation: epoch }); hydrate(); renderMessages(); }, 'receive-action'));
       menu.append(menuAction('在文件夹中显示', () => bridge.revealFile(message.id)));
       const retry = menuAction('重新接收', () => { ready.set(message.id, 'loading'); prepareQueue.push({ id: message.id, generation: epoch }); hydrate(); renderMessages(); }, 'retry-action'); menu.append(retry);
     }
@@ -139,8 +150,11 @@ function updateFile(message, row) {
   const isReady = ready.get(message.id) === true, bubble = row.querySelector('.file-bubble');
   bubble.draggable = Boolean(bridge && isReady);
   bubble.title = bridge ? (isReady ? '直接拖到桌面、文件夹或其他应用' : '文件正在接收到本机') : message.fileName;
+  row.classList.toggle('file-expired', Boolean(message.deleted));
+  if (message.deleted) { bubble.draggable = false; row.querySelectorAll('.file-actions button').forEach(button => { button.disabled = true; }); }
   const label = row.querySelector('.drag-label');
   if (label) { label.textContent = statusFor(message); label.classList.toggle('has-error', ready.get(message.id) === 'error'); }
+  const receive = row.querySelector('.receive-action'); if (receive) receive.hidden = Boolean(ready.has(message.id) && ready.get(message.id) !== 'error');
   const retry = row.querySelector('.retry-action'); if (retry) retry.hidden = ready.get(message.id) !== 'error';
 }
 const respondingRequests = new Set();
@@ -209,10 +223,16 @@ function renderMessages() {
   if (!state.messages.length) {
     let empty = timeline.querySelector('.empty-state');
     if (!empty) {
-      empty = element('div', 'empty-state'); empty.append(element('div', 'empty-mark', '⇄'), element('strong', '', '一起，传点东西'), element('p', '', '把文件拖进来，大家都能收到\n也可以随手发一句话'));
+      empty = element('div', 'empty-state'); empty.append(element('div', 'empty-mark', '⇄'), element('strong', '', '一起，传点东西'), element('p', '', '拖入文件开始传送'));
       if (bridge?.createInvite) empty.append(action('＋ 邀请设备加入', openInvite));
     }
     desired.push(empty);
+  }
+  if (readingHistory) desired.push(action('返回最新记录', loadLatest, 'history-load history-latest'));
+  if (state.history?.hasMore) {
+    let load = timeline.querySelector('.history-load');
+    if (!load) load = action('更早记录', loadHistory, 'history-load');
+    desired.push(load);
   }
   let previousDay = '';
   for (const message of state.messages) {
@@ -232,6 +252,25 @@ function renderMessages() {
   desired.forEach((node, index) => { if (timeline.children[index] !== node) timeline.insertBefore(node, timeline.children[index] || null); });
   if (nearBottom && !timeline.querySelector('.file-more[open]') && !timeline.contains(document.activeElement)) timeline.scrollTop = timeline.scrollHeight;
 }
+async function loadLatest() {
+  const generation = epoch, latest = await api('/api/state');
+  if (generation !== epoch) return;
+  readingHistory = false; historyLoaded = false; applyState(latest);
+  $('timeline').scrollTop = $('timeline').scrollHeight;
+}
+async function loadHistory() {
+  if (!state.history?.hasMore || !state.history.before) return;
+  const timeline = $('timeline'), before = state.history.before, height = timeline.scrollHeight;
+  const button = timeline.querySelector('.history-load'); if (button) button.disabled = true;
+  const generation = epoch;
+  try {
+    const page = await api(`/api/history?before=${encodeURIComponent(before)}&limit=100`);
+    if (generation !== epoch) return;
+    state = prependHistory(state, page); readingHistory = true;
+    for (const message of page.messages || []) if (message.type === 'file') observedFiles.add(message.id);
+    renderMessages(); timeline.scrollTop += timeline.scrollHeight - height;
+  } finally { if (button) button.disabled = false; }
+}
 async function saveFile(message) {
   if (bridge) { if (await bridge.saveFile(message.id)) toast('文件已保存'); return; }
   const response = await fetch(`${config.room.baseUrl}/api/files/${message.id}`, { headers: { 'X-Room-Key': config.room.key, 'X-Device-Id': config.device.id } });
@@ -250,7 +289,7 @@ function cancelConnection(message) {
   connectionError = message; connection(false);
 }
 async function join() {
-  const generation = ++epoch; clearTimeout(reconnectTimer); requestController.abort(); requestController = new AbortController(); socket?.close(); ready.clear(); prepareQueue.length = 0; connection(false);
+  const generation = ++epoch; clearTimeout(reconnectTimer); requestController.abort(); requestController = new AbortController(); socket?.close(); ready.clear(); prepareQueue.length = 0; historyLoaded = false; connection(false);
   if (config.network && (!config.network.available || config.network.switching)) { connectionError = '所选网络已断开或正在切换，请等待连接恢复'; connection(false); return; }
   $('group-name').textContent = groupName(); $('message-input').placeholder = '发文件或说点什么…'; $('drop-label').textContent = `松开，发到「${groupName()}」`; document.title = `${groupName()} · 拾传`;
   renderMessages();
@@ -260,7 +299,7 @@ async function join() {
     const initial = await api('/api/state'); if (generation !== epoch) return; applyState(initial);
   } catch (error) { retryConnection(generation, error); return; }
   if (generation !== epoch) return;
-  const url = new URL('/api/events', config.room.baseUrl); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('key', config.room.key); url.searchParams.set('device', config.device.id);
+  const url = new URL('/api/events', config.room.baseUrl); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('key', config.room.key); url.searchParams.set('device', config.device.id); url.searchParams.set('stream', '2');
   const current = new WebSocket(url); socket = current;
   const handshake = setTimeout(() => { if (generation === epoch && current.readyState !== WebSocket.OPEN) { connectionError = '实时连接握手超时，请检查网络和托管电脑'; current.close(); } }, 8000);
   current.onopen = () => { clearTimeout(handshake); if (generation === epoch) { reconnectAttempt = 0; connectionError = ''; connection(true); } else current.close(); };
@@ -352,19 +391,19 @@ function description(text) { return element('p', 'panel-description', text); }
 function input(placeholder, id, value = '') { const field = element('input', 'panel-input'); field.id = id; field.placeholder = placeholder; field.value = value; return field; }
 async function openInvite() {
   if (!bridge?.createInvite) { toast('请在桌面端生成邀请码'); return; }
-  const body = openPanel('邀请设备加入', 'invite'); body.append(description(`邀请设备加入「${groupName()}」。加入后会一直保留，下次无需再输入。`));
+  const body = openPanel('邀请设备加入', 'invite');
   const code = element('div', 'invite-code', '······'); code.id = 'invite-code'; const expiry = element('div', 'invite-expiry', '正在生成邀请码…'); body.append(code, expiry);
   const result = await bridge.createInvite(); if (panelKind !== 'invite' || !$('panel').open) return;
   code.textContent = result.code;
   if (result.qrDataUrl) {
     const qr = element('img', 'invite-qr'); qr.src = result.qrDataUrl; qr.alt = '用拾传手机端扫描加入本群'; qr.width = 152; qr.height = 152;
     body.prepend(qr);
-    body.append(description('手机与电脑连接同一 Wi-Fi，在拾传手机端点击「扫码加入」。'));
+    body.append(description('连接同一网络后扫码加入。'));
   }
   const expiresAt = typeof result.expiresAt === 'number' ? result.expiresAt : new Date(result.expiresAt).getTime();
   const tick = () => { const seconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000)); expiry.textContent = seconds ? `一次有效 · ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} 后失效` : '邀请码已过期，请重新生成'; };
   tick(); inviteTimer = setInterval(tick, 1000);
-  body.append(action('复制邀请码', async () => { await bridge.copy(String(result.code)); toast('邀请码已复制'); }, 'primary-button', 'copy-invite'), description('对方输入后，本群设备需要允许这次加入。'), action('重新生成', openInvite, 'secondary-button'));
+  body.append(action('复制邀请码', async () => { await bridge.copy(String(result.code)); toast('邀请码已复制'); }, 'primary-button', 'copy-invite'), action('重新生成', openInvite, 'secondary-button'));
   if (result.link) body.append(action('复制手机邀请链接', async () => { await bridge.copy(result.link); toast('邀请链接已复制'); }, 'secondary-button'), description(`手动连接地址：${result.baseUrl}`));
 }
 function openCreate() {
@@ -374,7 +413,7 @@ function openCreate() {
     if (!name.value.trim()) { name.focus(); return; } submit.disabled = true;
     try { await bridge.createGroup(name.value.trim()); $('panel').close(); await refreshGroups(); } finally { submit.disabled = false; }
   }, 'primary-button', 'confirm-create-group');
-  body.append(description('每个群都有独立窗口、成员、消息和文件。同一台设备可同时加入多个群。'), name, submit); name.onkeydown = event => { if (event.key === 'Enter' && !event.isComposing) submit.click(); }; name.focus();
+  body.append(name, submit); name.onkeydown = event => { if (event.key === 'Enter' && !event.isComposing) submit.click(); }; name.focus();
 }
 function openJoin() {
   if (pendingTicket) { openPending(pendingTicket); return; }
@@ -398,11 +437,11 @@ function openJoin() {
   };
   nearbyRefresh = populate;
   nearby.onchange = () => { address.value = nearby.value; }; address.oninput = () => { nearby.value = ''; };
-  body.append(description('输入 6 位邀请码。仅在所选网络寻找对方，也可选择附近群或填写电脑地址。'), code, nearby, address, submit, action('刷新附近的群', populate, 'secondary-button')); populate().catch(() => {}); code.onkeydown = event => { if (event.key === 'Enter' && !event.isComposing) submit.click(); }; code.focus();
+  body.append(code, nearby, address, submit, action('刷新附近的群', populate, 'secondary-button')); populate().catch(() => {}); code.onkeydown = event => { if (event.key === 'Enter' && !event.isComposing) submit.click(); }; code.focus();
 }
 function openPending(ticket) {
   pendingTicket = ticket; clearTimeout(pendingTimer);
-  const body = openPanel('等待对方允许', 'pending'); body.append(element('div', 'pending-icon', '◷'), element('p', 'pending-title', '加入申请已发出'), description(`请让「${ticket.groupName || '对方群'}」中已加入的设备允许这次申请。通过后会自动打开新窗口。`));
+  const body = openPanel('等待对方允许', 'pending'); body.append(element('div', 'pending-icon', '◷'), element('p', 'pending-title', '加入申请已发出'), description(`等待「${ticket.groupName || '对方群'}」批准。`));
   const status = element('p', 'panel-description'); status.id = 'join-status'; body.append(status);
   const poll = async () => {
     if (pendingTicket !== ticket) return;
@@ -434,7 +473,6 @@ async function openNetwork() {
   const next = await bridge.getNetwork();
   if (panelKind !== 'network' || generation !== networkPanelEpoch) return;
   networkState(next); body.replaceChildren();
-  body.append(description('群监听、附近设备发现与传输共用此网络。网络断开后会等待原连接，不会自动换到其他网卡。'));
   const selected = next.selected;
   const current = element('div', 'network-current');
   current.append(element('strong', '', selected ? `${networkType(selected.type)} · ${selected.name}` : '尚未选择网络'), element('span', '', selected ? `${selected.cidr || selected.address} · ${next.available ? '已连接' : '已断开'}` : '请连接 Wi-Fi 或有线网络'));
@@ -444,7 +482,7 @@ async function openNetwork() {
     const line = element('label', 'network-option'), radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'pickdrop-network'; radio.value = value; radio.checked = checked;
     const words = element('span'); words.append(element('strong', '', label), element('small', '', detail)); line.append(radio, words); return line;
   };
-  form.append(row('auto', '自动选择', '优先已连接的 Wi-Fi / 有线网络；点应用可重新选择', next.selection.mode === 'auto'));
+  form.append(row('auto', '自动选择', 'Wi-Fi / 有线网络', next.selection.mode === 'auto'));
   const physical = next.interfaces.filter(item => !item.virtual), virtual = next.interfaces.filter(item => item.virtual);
   const choice = item => row(item.id, `${networkType(item.type)} · ${item.name}`, `${item.cidr || item.address}${!item.cidr && item.netmask ? ` · 子网掩码 ${item.netmask}` : ''}${item.description ? ` · ${item.description}` : ''}`, next.selection.mode === 'manual' && selected?.id === item.id);
   physical.forEach(item => form.append(choice(item)));
@@ -457,7 +495,7 @@ async function openNetwork() {
     try { const result = await bridge.setNetwork(selectedRadio.value === 'auto' ? { mode: 'auto' } : { mode: 'manual', id: selectedRadio.value }); networkState(result); toast(result.available ? `已使用 ${result.selected.name} · ${result.selected.address}` : '暂无可用网络'); if (panelKind === 'network') await openNetwork(); }
     finally { apply.disabled = false; }
   }, 'primary-button', 'apply-network');
-  body.append(apply, action('刷新网络列表', openNetwork, 'secondary-button'), description('切换网络会重新连接群。文件正在传输时不能切换；请先完成或取消。'));
+  body.append(apply, action('刷新网络列表', openNetwork, 'secondary-button'));
 }
 
 function confirmOperation(title, text, callback) {
@@ -471,7 +509,7 @@ function openConnectionDiagnostic() {
   if (bridge?.getNetwork) body.append(action('网络连接设置', openNetwork, 'secondary-button'));
 }
 function openMembers() {
-  const body = openPanel(`${groupName()} · 设备`, 'members'); body.append(description('离线设备仍保留在本群，重新上线后继续同步。'));
+  const body = openPanel(`${groupName()} · 设备`, 'members');
   if (connectionError) body.append(action('查看连接诊断', openConnectionDiagnostic, 'secondary-button', 'connection-diagnostic'));
   if (bridge?.listJoinRequests) body.append(action(`处理加入申请（${requests.length}）`, openRequests, 'primary-button', 'member-join-requests'));
   if (config.room.local && Number(config.room.authVersion) !== 2 && bridge?.secureMembers) {
@@ -479,8 +517,8 @@ function openMembers() {
   }
   const devices = element('div'); devices.id = 'devices'; body.append(devices);
   if (!config.room.local && bridge?.leaveGroup) {
-    body.append(action('退出此群', () => confirmOperation('退出此群', '退出会撤销这台设备的群访问授权，并移除本地加入关系。重新加入需要托管电脑批准。', () => bridge.leaveGroup()), 'secondary-button', 'leave-group'), action('忘记此群', () => confirmOperation('忘记此群', '仅删除本地加入关系，不撤销主机上的授权。主机离线时也可操作；缓存文件保留。需要重新加入时请扫码申请。', () => bridge.forgetGroup()), 'secondary-button', 'forget-group'));
-  } else if (config.room.local) body.append(description('这台电脑托管此群，不能退出或忘记。关闭窗口可继续在托盘中提供服务。'));
+    body.append(action('退出此群', () => confirmOperation('退出此群', '退出会撤销这台设备的群访问授权，并移除本地加入关系。重新加入需要托管电脑批准。', () => bridge.leaveGroup()), 'secondary-button', 'leave-group'), action('忘记此群', () => confirmOperation('忘记此群', '删除本机连接和接收缓存，不撤销主机授权。再次加入需要邀请。', () => bridge.forgetGroup()), 'secondary-button', 'forget-group'));
+  }
   if (bridge?.createInvite) body.append(action('＋ 邀请设备', openInvite, 'primary-button'));
   const settings = element('div', 'device-settings'); const label = element('label', '', '这台设备的名字'); label.htmlFor = 'device-name'; const name = input('设备名称', 'device-name', config.device.name); name.maxLength = 40;
   settings.append(label, name, action('保存设备名称', async () => {
@@ -489,6 +527,43 @@ function openMembers() {
     else { config.device.name = name.value.trim(); localStorage.setItem('pickdrop-device', JSON.stringify(config.device)); }
     await api('/api/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config.device) }); toast('设备名称已保存');
   }, 'secondary-button', 'rename-device')); body.append(settings); if (bridge?.getNetwork) body.append(action('网络连接设置', openNetwork, 'secondary-button')); renderDevices(); renderRequests();
+}
+async function openStorage() {
+  closeMenu();
+  if (!bridge?.getStorage) { toast('存储管理需要桌面客户端'); return; }
+  const body = openPanel('存储与清理', 'storage');
+  const info = await bridge.getStorage();
+  if (panelKind !== 'storage') return;
+  const summary = element('div', 'storage-summary');
+  for (const [label, value] of [['接收缓存', info.cache], ['本机托管', info.hosted]]) {
+    const card = element('div', 'storage-stat'); card.append(element('strong', '', fileSize(value?.bytes || 0)), element('small', '', `${label} · ${value?.files || 0} 个文件`)); summary.append(card);
+  }
+  body.append(summary);
+  body.append(action('清理接收缓存', () => confirmOperation('清理接收缓存', '已另存的文件不受影响，正在使用的缓存会保留。', async () => { await bridge.clearCache(); if (!config.room.local) { ready.clear(); prepareQueue.length = 0; } renderMessages(); toast('接收缓存已清理'); await openStorage(); }), 'primary-button'));
+  if (info.cache?.maxBytes) body.append(description(`缓存上限 ${fileSize(info.cache.maxBytes)} · 最长 ${info.cache.maxAgeDays || 7} 天`));
+  if (config.room.local && bridge.listHostFiles) {
+    body.append(description('清理主机原件后，全群将无法再次下载。'));
+    const selected = new Set(), list = element('div', 'storage-files');
+    let before, loading = false;
+    const more = action('更多主机文件', fetchFiles, 'secondary-button');
+    async function fetchFiles() {
+      if (loading) return; loading = true; more.disabled = true;
+      try {
+        const page = await bridge.listHostFiles(before ? {before} : {}); if (panelKind !== 'storage') return;
+        const files = Array.isArray(page) ? page : page.files || [];
+        for (const file of files) {
+          const row = element('label', 'storage-file'), checkbox = element('input'); checkbox.type = 'checkbox';
+          checkbox.onchange = () => { if (checkbox.checked) selected.add(file.id); else selected.delete(file.id); remove.disabled = !selected.size; };
+          const name = element('span', '', file.fileName || file.name); name.title = file.fileName || file.name;
+          row.append(checkbox, name, element('small', '', fileSize(file.size || 0))); list.append(row);
+        }
+        before = page.before || (files.length ? String(files.at(-1).sequence) : undefined);
+        more.hidden = !(page.hasMore ?? files.length === 100);
+      } finally { loading = false; more.disabled = false; }
+    }
+    const remove = action('清理所选主机文件', () => confirmOperation('清理主机原文件', `将清理 ${selected.size} 个文件。其他成员将不能从主机下载这些文件，请先确认需要的文件已另存。`, async () => { await bridge.deleteHostFiles([...selected]); toast('所选文件已清理'); await openStorage(); }), 'secondary-button'); remove.disabled = true;
+    body.append(list, more, remove); await fetchFiles();
+  }
 }
 async function refreshRequests() {
   if (!bridge?.listJoinRequests) return;
@@ -525,6 +600,7 @@ async function boot() {
     config = { device, room: { ...room, local: false, name: '我的文件' }, window: {} };
   }
   document.body.dataset.platform = config.platform || 'web'; windowState(config.window || {}); networkState(config.network);
+  bridge?.onCacheCleared?.(event => { if (!config.room.local && (!event?.groupId || event.groupId === config.room.id)) { ready.clear(); prepareQueue.length = 0; renderMessages(); } });
   bridge?.onNearbyChanged?.(() => { if (panelKind === 'join') nearbyRefresh?.().catch(showError); });
   bridge?.onNetworkChanged?.(next => { networkState(next); if (panelKind === 'network') openNetwork().catch(showError); });
   bridge?.onGroupsChanged?.(() => groupsChanged().catch(showError)); bridge?.onJoinRequestsChanged?.(() => refreshRequests().catch(showError)); bridge?.onWindowChanged?.(windowState);
@@ -534,12 +610,18 @@ async function boot() {
 }
 $('connection-status').onclick = event => { if (connectionError) { event.stopPropagation(); openConnectionDiagnostic(); } };
 $('group-menu-button').onclick = async () => { if (!config) return; if (!$('group-menu').hidden) { closeMenu(); return; } $('group-menu').hidden = false; $('group-menu-button').setAttribute('aria-expanded', 'true'); busy(); try { await refreshGroups(); } catch (error) { showError(error); } };
+$('storage-settings').onclick = () => openStorage().catch(showError);
 $('network-settings').onclick = () => openNetwork().catch(showError); $('network-offline').onclick = () => openNetwork().catch(showError);
 $('create-group').onclick = openCreate; $('join-group').onclick = openJoin; $('invite-members').onclick = () => openInvite().catch(showError); $('view-members').onclick = openMembers; $('members-button').onclick = () => { if (config) openMembers(); };
 $('view-join-requests').onclick = openRequests;
 $('close-panel').onclick = () => $('panel').close(); $('panel').addEventListener('close', () => { panelKind = ''; clearInterval(inviteTimer); busy(); });
 $('panel').addEventListener('click', event => { if (event.target === $('panel')) { const rect = $('panel').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('panel').close(); } });
-$('choose-file').onclick = () => $('file-input').click(); $('file-input').onchange = event => { sendFiles(Array.from(event.target.files)); event.target.value = ''; };
+$('choose-file').onclick = async () => {
+  try { await bridge?.setNativeDialogBusy?.(true); $('file-input').click(); }
+  catch (error) { bridge?.setNativeDialogBusy?.(false); showError(error); }
+};
+$('file-input').addEventListener('cancel', () => bridge?.setNativeDialogBusy?.(false));
+$('file-input').onchange = event => { bridge?.setNativeDialogBusy?.(false); sendFiles(Array.from(event.target.files)); event.target.value = ''; };
 $('composer').onsubmit = event => { event.preventDefault(); sendComposer().catch(showError); }; $('message-input').onkeydown = event => { if (event.key === 'Enter' && event.isComposing) event.preventDefault(); };
 $('pin-button').onclick = async () => { try { const next = await bridge?.pin?.(!config.window.pinned); if (next) windowState(next); } catch (error) { showError(error); } };
 $('dock-button').onclick = () => { closeMenu(); document.activeElement?.blur(); bridge?.dock?.(); }; $('close-button').onclick = () => bridge?.close?.();
@@ -550,4 +632,5 @@ window.addEventListener('dragover', event => { if (event.dataTransfer?.types.inc
 window.addEventListener('dragleave', () => { dropDepth--; if (dropDepth <= 0) { dropDepth = 0; $('drop-overlay').hidden = true; busy(); } });
 window.addEventListener('drop', event => { event.preventDefault(); dropDepth = 0; $('drop-overlay').hidden = true; if (event.dataTransfer?.files.length) sendFiles(Array.from(event.dataTransfer.files)); busy(); });
 window.addEventListener('blur', () => { dropDepth = 0; $('drop-overlay').hidden = true; busy(); });
+window.addEventListener('focus', busy);
 boot().catch(showError);

@@ -26,11 +26,10 @@ async function api(group, route, options = {}) {
 async function join(group, manual = false) {
   const invite = await manager.createInvite(group.id);
   await page.getByRole('button', { name: '加入传输群', exact: true }).click();
-  await page.getByText('附近的传输群', { exact: true }).waitFor();
-  await page.getByTestId('discovery-unavailable').waitFor();
-  await page.getByText('此环境不支持附近发现', { exact: true }).waitFor();
-  await page.screenshot({ path: 'artifacts/mobile-nearby-web.png' });
-  await page.getByRole('button', { name: '高级连接', exact: true }).click();
+  await page.getByRole('button', { name: '扫描电脑二维码', exact: true }).waitFor();
+  assert.equal(await page.getByText('附近的传输群', { exact: true }).count(), 0);
+  await page.screenshot({ path: 'artifacts/mobile-scan-first-web.png' });
+  await page.getByRole('button', { name: '使用邀请链接或地址', exact: true }).click();
   if (manual) {
     await page.getByRole('tab', { name: '地址 + 邀请码', exact: true }).click();
     await page.getByLabel('电脑地址', { exact: true }).fill(group.baseUrl);
@@ -78,6 +77,16 @@ try {
   await page.getByRole('button', { name: '返回群列表' }).click();
   await page.getByRole('button', { name: '打开项目传输群', exact: true }).click();
   assert.equal(await page.getByLabel('消息内容', { exact: true }).inputValue(), '这份草稿属于项目群');
+  // Reusing a consumed invitation to this paired group needs no new approval
+  // and must leave the per-group text draft intact.
+  await page.getByRole('button', { name: '返回群列表' }).click();
+  await page.getByRole('button', { name: '加入传输群', exact: true }).click();
+  await page.getByRole('button', { name: '使用邀请链接或地址', exact: true }).click();
+  await page.getByLabel('完整邀请链接', { exact: true }).fill(`${first.baseUrl}/#invite=000000&group=${first.id}`);
+  await page.getByRole('button', { name: '加入这个群', exact: true }).click();
+  await page.getByRole('button', { name: '返回群列表' }).waitFor();
+  assert.equal(await page.getByLabel('消息内容', { exact: true }).inputValue(), '这份草稿属于项目群');
+  assert.equal((await manager.listJoinRequests(first.id)).length, 0);
   // Approve a new device from the mobile member sheet.
   const invitation = await manager.createInvite(first.id);
   const request = await fetch(first.baseUrl + '/api/pair/request', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: invitation.code, device: { id: randomUUID(), name: '小周的手机', kind: 'ios' } }) });
@@ -96,7 +105,7 @@ try {
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
   await poll(async () => (await api(first, '/api/state')).messages.some(message => message.text === '小屏幕发送成功'));
   assert.deepEqual(errors, []);
-  await writeFile('artifacts/mobile-ui-smoke.json', JSON.stringify({ runtime: 'React Native Web, not a physical device', pairing: ['invitation link', 'address and code'], discoveryWebFallback: true, realServer: true, groupIsolation: true, perGroupTextDraft: true, memberApproval: true, narrowScreen: '320x568', errors }, null, 2));
+  await writeFile('artifacts/mobile-ui-smoke.json', JSON.stringify({ runtime: 'React Native Web, not a physical device', pairing: ['invitation link', 'address and code'], scanFirst: true, realServer: true, groupIsolation: true, perGroupTextDraft: true, pairedLinkReconnect: true, memberApproval: true, narrowScreen: '320x568', errors }, null, 2));
   console.log('Mobile UI smoke passed: actual App.tsx, real pairing/approval, two groups, drafts, text, narrow layout.');
 } finally {
   for (const peer of peers) peer.terminate();

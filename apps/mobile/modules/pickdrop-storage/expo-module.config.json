@@ -1,0 +1,1 @@
+{"platforms":["ios","android"],"ios":{"modules":["PickDropStorageModule"]},"android":{"modules":["app.pickdrop.storage.PickDropStorageModule"]}}

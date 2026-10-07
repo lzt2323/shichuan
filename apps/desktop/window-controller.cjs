@@ -1,7 +1,7 @@
 const { screen } = require('electron');
-const WIDTH = 340, HEIGHT = 470, TAB_DEPTH = 12, TAB_SPAN = 24;
+const WIDTH = 340, HEIGHT = 470, TAB_DEPTH = 40, TAB_SPAN = 48;
 const EDGES = ['left', 'right', 'top'];
-const tabSize = edge => edge === 'top' ? { width: TAB_SPAN, height: TAB_DEPTH } : { width: TAB_DEPTH, height: TAB_SPAN };
+const tabSize = edge => edge === 'top' ? { width: 64, height: 34 } : { width: TAB_DEPTH, height: TAB_SPAN };
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const tabWindows = new Set();
 const inside = (point, box, padding = 0) => point.x >= box.x - padding && point.x < box.x + box.width + padding && point.y >= box.y - padding && point.y < box.y + box.height + padding;
@@ -32,21 +32,22 @@ function layoutTabs() {
     const top = edge === 'top';
     // Keep hemispheres away from screen corners so perpendicular edges never overlap.
     const extent = top ? area.width : area.height;
-    const inset = Math.min(24, Math.max(0, Math.floor((extent - TAB_SPAN) / (top ? 2 : 1))));
+    const inset = Math.min(24, Math.max(0, Math.floor((extent - tabSize(edge).width) / (top ? 2 : 1))));
     const start = (top ? area.x : area.y) + inset, length = extent - inset * (top ? 2 : 1);
-    const desired = item => top ? item.bounds().x + Math.round((item.bounds().width - TAB_SPAN) / 2) : item.bounds().y;
+    const span = top ? tabSize(edge).width : tabSize(edge).height;
+    const desired = item => top ? item.bounds().x + Math.round((item.bounds().width - span) / 2) : item.bounds().y;
     items.sort((a, b) => desired(a) - desired(b) || a.win.id - b.win.id);
-    const gap = items.length * (TAB_SPAN + 8) <= length ? 8 : 0;
+    const gap = items.length * (span + 8) <= length ? 8 : 0;
     let next = start;
     items.forEach((item, index) => {
-      const remaining = (items.length - index) * (TAB_SPAN + gap) - gap;
+      const remaining = (items.length - index) * (span + gap) - gap;
       const position = clamp(Math.max(next, desired(item)), start, Math.max(start, start + length - remaining));
       item.apply({
         x: top ? position : edge === 'left' ? area.x : area.x + area.width - TAB_DEPTH,
         y: top ? area.y : position,
         ...tabSize(edge),
       });
-      next = position + TAB_SPAN + gap;
+      next = position + span + gap;
     });
   }
 }
@@ -54,11 +55,12 @@ function layoutTabs() {
 function createWindowController(win, saved, persist) {
   let expandedBounds = win.getBounds(), edge = EDGES.includes(saved?.edge) ? saved.edge : null;
   let pinned = Boolean(saved?.pinned), collapsed = false, uiBusy = false, nativeBusy = false, inputBusy = false, dragBusy = false;
+  let focused = win.isFocused?.() ?? true, blurTimer;
   let motionTimer, motionTarget, finishMotion, dragPoll, windowDrag = null, candidateEdge = null, transition = '', reducedMotion = false;
-  let suppressMoveUntil = 0, hoverTimer, leaveTimer, moveTimer, dragTimer, saveTimer, draggingOut = false;
+  let suppressMoveUntil = 0, hoverTimer, leaveTimer, moveTimer, dragTimer, revealTimer, saveTimer, draggingOut = false;
   const alive = () => !win.isDestroyed();
   const busy = () => pinned || uiBusy || nativeBusy || inputBusy || dragBusy || draggingOut || Boolean(windowDrag) || Boolean(transition);
-  const state = () => ({ pinned, docked: collapsed, collapsed, edge, candidateEdge, moving: Boolean(windowDrag?.moved), transition, contentWidth: expandedBounds.width, contentHeight: expandedBounds.height });
+  const state = () => ({ pinned, docked: collapsed, collapsed, edge, candidateEdge, moving: Boolean(windowDrag?.moved), transition, accepting: dragBusy, contentWidth: expandedBounds.width, contentHeight: expandedBounds.height });
   const emit = () => { if (alive() && !win.webContents.isDestroyed()) win.webContents.send('window:changed', state()); };
   const save = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => persist({ bounds: expandedBounds, edge, pinned, collapsed }), 150); };
   function applyBounds(bounds) { if (!alive()) return; suppressMoveUntil = Date.now() + 600; win.setBounds(bounds, false); }
@@ -155,15 +157,19 @@ function createWindowController(win, saved, persist) {
     emit(); save(); return state();
   }
   function setBusy(kind, value) {
-    if (kind === 'ui') uiBusy = Boolean(value);
+    if (kind === 'ui') uiBusy = focused && Boolean(value);
     if (kind === 'native') nativeBusy = Boolean(value);
-    if (kind === 'input') inputBusy = Boolean(value);
+    if (kind === 'input') inputBusy = focused && Boolean(value);
     if (busy()) clearTimeout(leaveTimer); else scheduleCollapse();
   }
   function dragActivity(value) {
     clearTimeout(dragTimer); dragBusy = Boolean(value);
-    if (dragBusy) { expand(); dragTimer = setTimeout(() => { dragBusy = false; scheduleCollapse(); }, 1800); }
-    else scheduleCollapse();
+    if (dragBusy) {
+      if (collapsed) { if (!revealTimer) revealTimer = setTimeout(() => { revealTimer = null; if (dragBusy) expand(); }, 120); }
+      else expand();
+      dragTimer = setTimeout(() => { dragBusy = false; emit(); scheduleCollapse(); }, 1800);
+    } else { clearTimeout(revealTimer); revealTimer = null; scheduleCollapse(); }
+    emit();
   }
   function nativeDragStart() {
     draggingOut = true; expand();
@@ -271,7 +277,14 @@ function createWindowController(win, saved, persist) {
     save(); emit(); scheduleCollapse();
   }
   win.on('move', moved); win.on('resize', moved);
-  win.on('blur', () => endWindowDrag(true));
+  win.on('blur', () => {
+    focused = false; uiBusy = false; inputBusy = false;
+    // Native blur can arrive before Chromium's released-pointer IPC. Allow that
+    // queued release to commit, but still cancel a genuinely interrupted drag.
+    clearTimeout(blurTimer); blurTimer = setTimeout(() => { endWindowDrag(true); scheduleCollapse(); }, 60);
+    scheduleCollapse();
+  });
+  win.on('focus', () => { focused = true; clearTimeout(blurTimer); });
   win.on('hide', () => { endWindowDrag(true); settleMotion(); clearTimeout(leaveTimer); clearTimeout(hoverTimer); hoverTimer = null; });
   // Poll only to notice leaving this small window, never to capture the screen edge.
   let wasInside = false;
@@ -284,7 +297,7 @@ function createWindowController(win, saved, persist) {
   changedEvents.forEach((handler, event) => screen.on(event, handler));
   win.on('closed', () => {
     tabWindows.delete(tabRecord); layoutTabs();
-    clearInterval(pointerPoll); clearInterval(dragPoll); stopMotion(); [hoverTimer, leaveTimer, moveTimer, dragTimer, saveTimer].forEach(clearTimeout);
+    clearInterval(pointerPoll); clearInterval(dragPoll); stopMotion(); [hoverTimer, leaveTimer, moveTimer, dragTimer, revealTimer, saveTimer, blurTimer].forEach(clearTimeout);
     changedEvents.forEach((handler, event) => screen.removeListener(event, handler));
     persist({ bounds: expandedBounds, edge, pinned, collapsed });
   });

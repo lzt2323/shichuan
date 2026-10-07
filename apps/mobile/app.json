@@ -2,7 +2,7 @@
   "expo": {
     "name": "拾传",
     "slug": "pickdrop",
-    "version": "0.3.5",
+    "version": "0.4.0",
     "orientation": "portrait",
     "scheme": "pickdrop",
     "userInterfaceStyle": "light",
@@ -16,7 +16,8 @@
           "NSAllowsArbitraryLoads": true
         },
         "UIFileSharingEnabled": true,
-        "LSSupportsOpeningDocumentsInPlace": true
+        "LSSupportsOpeningDocumentsInPlace": true,
+        "NSPhotoLibraryAddUsageDescription": "允许拾传将你选择接收的图片保存到相册"
       }
     },
     "android": {
@@ -25,7 +26,7 @@
         "android.permission.INTERNET",
         "android.permission.CAMERA"
       ],
-      "versionCode": 305,
+      "versionCode": 400,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#126A5A",
@@ -33,6 +34,7 @@
       }
     },
     "plugins": [
+      "./plugins/withPickDropStorage",
       [
         "expo-camera",
         {

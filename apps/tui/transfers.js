@@ -1,17 +1,18 @@
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
-import { promises as fs, createReadStream, createWriteStream } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { randomUUID, createHash } from 'node:crypto';
 import { safeFileName } from '../../shared/protocol.js';
+import { downloadVerified } from '../../shared/download.js';
 
 export class TransferQueue {
   constructor({ manager, onChange = () => {}, fetchState }) { this.manager = manager; this.onChange = onChange; this.fetchState = fetchState; this.tasks = new Map(); this.running = false; }
-  list() { return [...this.tasks.values()].map(({ controller, source, directory, ...task }) => task); }
+  list() { return [...this.tasks.values()].map(({ controller, source, directory, getMessages, message, ...task }) => task); }
   add(type, groupId, values) {
-    const task = { id: randomUUID(), type, groupId, ...values, name: type === 'upload' ? path.basename(values.source) : values.messageId, status: 'queued', bytes: 0, total: 0, createdAt: Date.now() };
+    const task = { id: randomUUID(), type, groupId, ...values, name: type === 'upload' ? path.basename(values.source) : type === 'download-all' ? '全部群文件' : values.messageId, status: 'queued', bytes: 0, total: 0, createdAt: Date.now() };
     // Keep a bounded history, but never drop a running or queued transfer.
     if (this.tasks.size >= 200) { const old = [...this.tasks.values()].find(t => ['done', 'failed', 'cancelled'].includes(t.status)); if (old) this.tasks.delete(old.id); else throw new Error('传输队列已满'); }
     this.tasks.set(task.id, task); this.onChange(); void this.pump(); return { id: task.id };
@@ -33,7 +34,8 @@ export class TransferQueue {
           task.controller.signal.throwIfAborted();
           const headers = { 'X-Room-Key': group.key, 'X-Device-Id': this.manager.device.id };
           if (task.type === 'upload') await this.upload(task, group, headers);
-          else await this.download(task, group, headers);
+          else if (task.type === 'download-all') await this.downloadAll(task, group, headers);
+          else await this.download(task, group, headers, task.message);
           if (task.status !== 'cancelled') task.status = 'done';
         } catch (error) { if (task.status !== 'cancelled') { task.status = 'failed'; task.error = error.message; } }
         finally { release?.(); task.controller = undefined; this.onChange(); }
@@ -72,25 +74,41 @@ export class TransferQueue {
       task.messageId = message.id; task.result = '已上传到群主机';
     } finally { await file.close(); }
   }
-  async download(task, group, headers) {
-    const state = await this.fetchState(group), message = state.messages.find(m => m.id === task.messageId && m.type === 'file');
-    if (!message || !/^[a-f0-9]{64}$/.test(message.sha256) || !Number.isSafeInteger(message.size) || message.size < 0) throw new Error('文件记录无效或已不存在');
+  async downloadAll(task, group, headers) {
+    task.completedFiles = 0;
+    for await (const message of task.getMessages(task.controller.signal)) {
+      task.controller.signal.throwIfAborted();
+      task.messageId = message.id; task.bytes = 0;
+      await this.download(task, group, headers, message);
+      task.completedFiles++; this.onChange();
+    }
+    task.name = '全部群文件'; task.result = task.directory;
+    if (!task.completedFiles) throw new Error('群中没有可接收的文件');
+  }
+  async fileMetadata(group, messageId) {
+    let message;
+    try { message = await this.manager.authenticated(group.id, '/api/messages/' + encodeURIComponent(messageId)); }
+    catch (error) {
+      if (error.status !== 404 || !this.fetchState) throw error;
+      // Compatibility only: old hosts did not expose single-message metadata.
+      message = (await this.fetchState(group)).messages.find(m => m.id === messageId && m.type === 'file');
+    }
+    if (!message || message.id !== messageId || message.type !== 'file' || !/^[a-f0-9]{64}$/.test(message.sha256) || !Number.isSafeInteger(message.size) || message.size < 0) throw new Error('文件记录无效或已不存在');
+    return message;
+  }
+  async download(task, group, headers, knownMessage) {
+    const message = knownMessage || await this.fileMetadata(group, task.messageId);
+    if (!message || message.type !== 'file' || !/^[a-f0-9]{64}$/.test(message.sha256) || !Number.isSafeInteger(message.size) || message.size < 0) throw new Error('文件记录无效或已不存在');
     task.name = safeFileName(message.fileName); task.total = message.size;
     await fs.mkdir(task.directory, { recursive: true, mode: 0o700 });
     const partial = path.join(task.directory, `.pickdrop-${randomUUID()}.partial`);
     try {
       const url = new URL('/api/files/' + encodeURIComponent(message.id), group.baseUrl);
-      const response = await new Promise((resolve, reject) => {
-        const request = (url.protocol === 'https:' ? https : http).get(url, { headers, signal: task.controller.signal, localAddress: this.manager.getNetwork?.().selected?.address }, resolve);
-        request.setTimeout(120000, () => request.destroy(new Error('下载两分钟无响应，请重试')));
-        request.on('error', reject);
+      let last = 0;
+      await downloadVerified({ url, headers, destination: partial, size: message.size, sha256: message.sha256,
+        signal: task.controller.signal, localAddress: this.manager.getNetwork?.().selected?.address,
+        onProgress: bytes => { task.bytes = bytes; if (Date.now() - last > 100) { last = Date.now(); this.onChange(); } },
       });
-      if (response.statusCode !== 200) { response.resume(); throw new Error(`下载失败 (${response.statusCode})`); }
-      const hash = createHash('sha256');
-      const meter = this.meter(task, hash);
-      meter.on('data', () => { if (task.bytes > message.size) meter.destroy(new Error('下载大小超出文件记录')); });
-      await pipeline(response, meter, createWriteStream(partial, { flags: 'wx', mode: 0o600 }), { signal: task.controller.signal });
-      if (task.bytes !== message.size || hash.digest('hex') !== message.sha256) throw new Error('SHA-256 校验失败，已丢弃下载');
       task.controller.signal.throwIfAborted();
       const ext = path.extname(task.name), stem = path.basename(task.name, ext);
       for (let n = 0; n < 10000; n++) {
