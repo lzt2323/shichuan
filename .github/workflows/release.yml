@@ -2,7 +2,7 @@ name: PickDrop Unified Release
 on:
   push:
     tags: ['v*']
-    branches: ['codex/**']
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:

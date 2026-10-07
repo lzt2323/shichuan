@@ -63,6 +63,7 @@ try {
   await api(first, '/api/messages', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Device-Id': phonePeer.id, 'X-Room-Key': peerKey }, body: JSON.stringify({ text: '最新的资料放这里，手机上也能收。' }) });
   await api(first, '/api/files?name=' + encodeURIComponent('项目说明.pdf'), { method: 'POST', headers: { 'Content-Type': 'application/pdf' }, body: Buffer.from('%PDF-1.4\n% mobile UI fixture\n') });
   await api(first, '/api/files?name=' + encodeURIComponent('设计资源.zip'), { method: 'POST', body: Buffer.from('504b0506000000000000000000000000000000000000', 'hex') });
+  await api(first, '/api/files?name=' + encodeURIComponent('图片预览.png'), { method: 'POST', headers: { 'Content-Type': 'image/png' }, body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAE0lEQVR4nGMImJYHRAwpq5qACAAmagXJ+JwBMgAAAABJRU5ErkJggg==', 'base64') });
   await page.goto(process.env.PICKDROP_MOBILE_WEB_URL || 'http://localhost:8082');
   await page.getByText('文件，递给大家。', { exact: true }).waitFor();
   await mkdir('artifacts', { recursive: true });
@@ -70,6 +71,19 @@ try {
   await join(first);
   await page.getByText('项目说明.pdf', { exact: true }).waitFor();
   await page.screenshot({ path: 'artifacts/mobile-group.png' });
+  // Browser previews deliberately expose a native-only placeholder; file menus
+  // still exercise the same production component and separate responders.
+  await page.getByText('在手机客户端中预览', { exact: true }).waitFor();
+  await page.getByRole('button', { name: '图片预览.png，更多操作', exact: true }).click();
+  await page.getByRole('button', { name: '保存到相册', exact: true }).waitFor();
+  await page.getByRole('button', { name: '保存到文件', exact: true }).waitFor();
+  await page.getByRole('button', { name: '分享给其他应用', exact: true }).waitFor();
+  await page.screenshot({ path: 'artifacts/mobile-file-menu.png' });
+  await page.getByRole('button', { name: '完成', exact: true }).click();
+  await page.getByRole('button', { name: '项目说明.pdf，更多操作', exact: true }).click();
+  assert.equal(await page.getByRole('button', { name: '保存到相册', exact: true }).count(), 0);
+  await page.getByRole('button', { name: '保存到文件', exact: true }).waitFor();
+  await page.getByRole('button', { name: '完成', exact: true }).click();
   await page.getByLabel('消息内容', { exact: true }).fill('这份草稿属于项目群');
   await page.getByRole('button', { name: '返回群列表' }).click();
   await join(second, true);
@@ -105,7 +119,7 @@ try {
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
   await poll(async () => (await api(first, '/api/state')).messages.some(message => message.text === '小屏幕发送成功'));
   assert.deepEqual(errors, []);
-  await writeFile('artifacts/mobile-ui-smoke.json', JSON.stringify({ runtime: 'React Native Web, not a physical device', pairing: ['invitation link', 'address and code'], scanFirst: true, realServer: true, groupIsolation: true, perGroupTextDraft: true, pairedLinkReconnect: true, memberApproval: true, narrowScreen: '320x568', errors }, null, 2));
+  await writeFile('artifacts/mobile-ui-smoke.json', JSON.stringify({ runtime: 'React Native Web, not a physical device', pairing: ['invitation link', 'address and code'], scanFirst: true, imagePreviewPlaceholder: true, separateFileMenus: true, realServer: true, groupIsolation: true, perGroupTextDraft: true, pairedLinkReconnect: true, memberApproval: true, narrowScreen: '320x568', errors }, null, 2));
   console.log('Mobile UI smoke passed: actual App.tsx, real pairing/approval, two groups, drafts, text, narrow layout.');
 } finally {
   for (const peer of peers) peer.terminate();

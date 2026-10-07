@@ -1,3 +1,4 @@
+import { ArrowUp, ChevronLeft, Ellipsis, Plus, Settings, X } from 'lucide-react-native';
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { AccessibilityInfo, Animated, ActivityIndicator, Modal, Platform, Pressable, StyleSheet, Text, View, KeyboardAvoidingView, ScrollView } from 'react-native';
@@ -24,20 +25,22 @@ export function Avatar({ name, id, size = 32, muted = false }: { name: string; i
 export function Button({ label, onPress, disabled = false, primary = false, danger = false, accessibilityLabel, compact = false }: { label: string; onPress: () => void; disabled?: boolean; primary?: boolean; danger?: boolean; accessibilityLabel?: string; compact?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel || label} accessibilityState={{ disabled }} onPress={onPress} disabled={disabled} style={({ pressed }) => [u.button, compact && u.compact, primary && u.primary, pressed && { opacity: .72 }, disabled && { opacity: .45 }]}><Text style={[u.buttonLabel, primary && { color: '#fff' }, danger && { color: palette.red }]}>{label}</Text></Pressable>;
 }
-export function IconButton({ glyph, label, onPress, disabled = false }: { glyph: string; label: string; onPress: () => void; disabled?: boolean }) {
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} onPress={onPress} disabled={disabled} style={({ pressed }) => [u.iconButton, pressed && { backgroundColor: '#E1F3EC' }, disabled && { opacity: .4 }]}><Text style={u.icon}>{glyph}</Text></Pressable>;
+const icons = { back: ChevronLeft, more: Ellipsis, plus: Plus, settings: Settings, close: X, send: ArrowUp };
+export function IconButton({ icon, label, onPress, disabled = false }: { icon: keyof typeof icons; label: string; onPress: () => void; disabled?: boolean }) {
+  const Icon = icons[icon];
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} onPress={onPress} disabled={disabled} style={({ pressed }) => [u.iconButton, pressed && { backgroundColor: '#E1F3EC' }, disabled && { opacity: .4 }]}><Icon size={22} strokeWidth={1.8} color={palette.blue} accessible={false} /></Pressable>;
 }
 export function Notice({ text, onDismiss, error = false }: { text: string; onDismiss?: () => void; error?: boolean }) {
   if (!text) return null;
-  return <View accessibilityLiveRegion="polite" style={[u.notice, error && { backgroundColor: '#fff1f2' }]}><Text style={[u.noticeText, error && { color: palette.red }]}>{text}</Text>{onDismiss && <IconButton glyph="×" label="关闭提示" onPress={onDismiss} />}</View>;
+  return <View accessibilityLiveRegion="polite" style={[u.notice, error && { backgroundColor: '#fff1f2' }]}><Text style={[u.noticeText, error && { color: palette.red }]}>{text}</Text>{onDismiss && <IconButton icon="close" label="关闭提示" onPress={onDismiss} />}</View>;
 }
 export function Busy({ label }: { label: string }) {
   if (!label) return null;
   return <View accessibilityLiveRegion="polite" style={u.busy}><ActivityIndicator size="small" color={palette.blue} /><Text style={u.busyText}>{label}</Text></View>;
 }
-export function Sheet({ visible, title, onClose, children, footer }: { visible: boolean; title: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode }) {
+export function Sheet({ visible, title, onClose, children, footer, onDismiss }: { visible: boolean; title: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode; onDismiss?: () => void }) {
   const reduced = useContext(ReducedMotion);
-  return <Modal visible={visible} animationType={reduced ? 'none' : 'slide'} presentationStyle="pageSheet" onRequestClose={onClose}><SafeAreaProvider><SafeAreaView style={u.sheet}><KeyboardAvoidingView style={u.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}><View style={u.sheetHeader}><Text accessibilityRole="header" style={u.sheetTitle}>{title}</Text><Button compact label="完成" onPress={onClose} /></View><ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={u.sheetContent}>{children}</ScrollView>{footer}</KeyboardAvoidingView></SafeAreaView></SafeAreaProvider></Modal>;
+  return <Modal visible={visible} animationType={reduced ? 'none' : 'slide'} presentationStyle="pageSheet" onRequestClose={onClose} onDismiss={onDismiss}><SafeAreaProvider><SafeAreaView style={u.sheet}><KeyboardAvoidingView style={u.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}><View style={u.sheetHeader}><Text accessibilityRole="header" style={u.sheetTitle}>{title}</Text><Button compact label="完成" onPress={onClose} /></View><ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={u.sheetContent}>{children}</ScrollView>{footer}</KeyboardAvoidingView></SafeAreaView></SafeAreaProvider></Modal>;
 }
 const u = StyleSheet.create({
   flex: { flex: 1 }, button: { minHeight: 44, paddingHorizontal: 17, paddingVertical: 12, borderRadius: 12, backgroundColor: '#E1F3EC', alignItems: 'center', justifyContent: 'center' }, compact: { minHeight: 44, paddingHorizontal: 12, paddingVertical: 9 }, primary: { backgroundColor: palette.blue }, buttonLabel: { color: '#126A5A', fontSize: 14, fontWeight: '600' }, iconButton: { width: 44, minHeight: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center' }, icon: { color: '#126A5A', fontSize: 26, lineHeight: 30 }, notice: { marginHorizontal: 16, marginBottom: 8, paddingLeft: 13, paddingVertical: 3, paddingRight: 5, backgroundColor: '#E1F3EC', borderRadius: 11, flexDirection: 'row', alignItems: 'center' }, noticeText: { flex: 1, fontSize: 12, color: '#126A5A', lineHeight: 19, paddingVertical: 7 }, busy: { flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 20, paddingVertical: 9 }, busyText: { flex: 1, fontSize: 12, color: '#126A5A', lineHeight: 18 }, sheet: { flex: 1, backgroundColor: '#F8FAF7' }, sheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 21, paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: palette.border }, sheetTitle: { fontSize: 18, fontWeight: '600', color: palette.ink }, sheetContent: { padding: 24, paddingBottom: 38 },

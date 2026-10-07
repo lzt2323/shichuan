@@ -24,6 +24,52 @@ function action(label, callback, className = '', id = '') {
   const button = element('button', className, label); button.type = 'button'; if (id) button.id = id;
   button.addEventListener('click', event => { event.stopPropagation(); Promise.resolve().then(callback).catch(showError); }); return button;
 }
+function fileIcon(kind) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  for (const [key, value] of Object.entries({ viewBox: '0 0 24 24', width: '18', height: '18', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.7', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true' })) svg.setAttribute(key, value);
+  const path = document.createElementNS(svg.namespaceURI, 'path');
+  path.setAttribute('d', kind === 'more' ? 'M5 12h.01M12 12h.01M19 12h.01' : 'M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M8 8h.01');
+  svg.append(path); return svg;
+}
+function previewable(message) { return Boolean(bridge?.previewFile && !message.deleted && /^image\/(png|jpeg|webp)$/i.test(message.mime || '') && /\.(png|jpe?g|webp)$/i.test(message.fileName) && message.size > 0 && message.size <= AUTO_RECEIVE_BYTES); }
+let previewGeneration = 0, activePreviewId = null;
+async function openImage(message) {
+  if (state.messages.find(item => item.id === message.id)?.deleted) return;
+  const token = ++previewGeneration; activePreviewId = message.id;
+  const body = openPanel(message.fileName, 'image-preview');
+  body.append(description('正在校验并加载图片…'));
+  try {
+    const result = await bridge.previewFile(message.id, true);
+    if (token !== previewGeneration || panelKind !== 'image-preview' || !$('panel').open) return;
+    const image = element('img', 'image-preview-full'); image.src = result.url; image.alt = message.fileName;
+    const controls = element('div', 'image-preview-controls');
+    controls.append(action('另存为…', () => saveFile(message)), action('用系统应用打开', () => bridge.openFile(message.id)));
+    body.replaceChildren(image, description(`${result.width} × ${result.height} · ${fileSize(message.size)}`), controls);
+    ready.set(message.id, true); renderMessages();
+  } catch (error) {
+    if (token === previewGeneration && panelKind === 'image-preview') body.replaceChildren(description(error.message), action('重试预览', () => openImage(message)), action('另存为…', () => saveFile(message)));
+  }
+}
+let thumbnailsActive = 0;
+const thumbnailQueue = [];
+function loadThumbnail(message, button) {
+  if (button.dataset.previewState || !previewable(message)) return;
+  button.dataset.previewState = 'loading';
+  thumbnailQueue.push({ message, button, generation: epoch }); drainThumbnails();
+}
+function drainThumbnails() {
+  while (thumbnailsActive < 2 && thumbnailQueue.length) {
+    const { message, button, generation } = thumbnailQueue.shift();
+    if (generation !== epoch || message.deleted) { delete button.dataset.previewState; continue; }
+    thumbnailsActive++;
+    bridge.previewFile(message.id).then(result => {
+      if (generation !== epoch || !button.isConnected || button.disabled) { delete button.dataset.previewState; return; }
+      const img = element('img'); img.src = result.url; img.alt = message.fileName; img.draggable = false;
+      button.replaceChildren(img); button.dataset.previewState = 'ready';
+    }).catch(() => { button.dataset.previewState = 'error'; button.replaceChildren(fileIcon('image'), element('span', '', '点按重试预览')); })
+      .finally(() => { thumbnailsActive--; drainThumbnails(); });
+  }
+}
 function busy() {
   const focused = document.hasFocus();
   const inputFocused = focused && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName);
@@ -108,6 +154,12 @@ function createMessage(message, animate) {
     bubble.addEventListener('dblclick', () => (bridge ? bridge.copy(message.text) : navigator.clipboard.writeText(message.text)).then(() => toast('文字已复制')).catch(showError)); body.append(bubble);
   } else {
     const bubble = element('div', 'bubble file-bubble'); bubble.dataset.fileId = message.id;
+    if (previewable(message)) {
+      bubble.classList.add('image-file-bubble');
+      const preview = action('', () => openImage(message), 'file-thumbnail');
+      preview.setAttribute('aria-label', `预览 ${message.fileName}`);
+      preview.append(fileIcon('image'), element('span', '', '点按查看图片')); bubble.append(preview);
+    }
     const content = element('div', 'file-main');
     const ext = message.fileName.includes('.') ? message.fileName.split('.').pop().slice(0, 5).toUpperCase() : 'FILE';
     const details = element('div', 'file-info');
@@ -116,14 +168,12 @@ function createMessage(message, animate) {
     if (bridge) metadata.append(element('span', 'drag-label'));
     details.append(name, metadata); content.append(element('div', 'file-icon', ext), details);
     const buttons = element('div', 'file-actions');
-    const primary = action(bridge ? '↗' : '↓', () => bridge ? bridge.openFile(message.id) : saveFile(message), 'file-primary');
-    primary.title = bridge ? '打开文件' : '保存文件'; primary.setAttribute('aria-label', primary.title);
-    buttons.append(primary);
     const more = element('details', 'file-more');
-    const summary = element('summary', '', '···'); summary.title = '更多文件操作'; summary.setAttribute('aria-label', '更多文件操作');
+    const summary = element('summary'); summary.append(fileIcon('more')); summary.title = '更多文件操作'; summary.setAttribute('aria-label', '更多文件操作');
     const menu = element('div', 'file-action-menu');
     const menuAction = (label, callback, className = '') => action(label, () => { more.open = false; summary.focus({ preventScroll: true }); return callback(); }, className);
     if (bridge) {
+      menu.append(menuAction('打开文件', () => bridge.openFile(message.id)));
       menu.append(menuAction('接收到本机', () => { ready.set(message.id, 'loading'); prepareQueue.push({ id: message.id, generation: epoch }); hydrate(); renderMessages(); }, 'receive-action'));
       menu.append(menuAction('在文件夹中显示', () => bridge.revealFile(message.id)));
       const retry = menuAction('重新接收', () => { ready.set(message.id, 'loading'); prepareQueue.push({ id: message.id, generation: epoch }); hydrate(); renderMessages(); }, 'retry-action'); menu.append(retry);
@@ -139,6 +189,10 @@ function createMessage(message, animate) {
       busy();
     });
     more.addEventListener('focusout', () => setTimeout(() => { if (!more.contains(document.activeElement)) more.open = false; }, 0));
+    details.tabIndex = 0; details.setAttribute('role', 'button'); details.setAttribute('aria-label', previewable(message) ? `预览 ${message.fileName}` : `打开 ${message.fileName}`);
+    const activate = () => { if (!row.classList.contains('file-expired')) (previewable(message) ? openImage(message) : bridge ? bridge.openFile(message.id) : saveFile(message)).catch(showError); };
+    details.addEventListener('click', activate);
+    details.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); } });
     content.append(buttons); bubble.append(content);
     bubble.addEventListener('dragstart', event => { event.preventDefault(); if (ready.get(message.id) === true) bridge.startDrag(message.id); });
     body.append(bubble);
@@ -151,7 +205,14 @@ function updateFile(message, row) {
   bubble.draggable = Boolean(bridge && isReady);
   bubble.title = bridge ? (isReady ? '直接拖到桌面、文件夹或其他应用' : '文件正在接收到本机') : message.fileName;
   row.classList.toggle('file-expired', Boolean(message.deleted));
+  if (message.deleted && panelKind === 'image-preview' && activePreviewId === message.id) $('panel').close();
   if (message.deleted) { bubble.draggable = false; row.querySelectorAll('.file-actions button').forEach(button => { button.disabled = true; }); }
+  const thumbnail = row.querySelector('.file-thumbnail');
+  if (thumbnail) {
+    thumbnail.disabled = Boolean(message.deleted);
+    if (message.deleted) { thumbnail.replaceChildren(fileIcon('image'), element('span', '', '主机文件已清理')); delete thumbnail.dataset.previewState; }
+    else if (isReady) loadThumbnail(message, thumbnail);
+  }
   const label = row.querySelector('.drag-label');
   if (label) { label.textContent = statusFor(message); label.classList.toggle('has-error', ready.get(message.id) === 'error'); }
   const receive = row.querySelector('.receive-action'); if (receive) receive.hidden = Boolean(ready.has(message.id) && ready.get(message.id) !== 'error');
@@ -384,7 +445,7 @@ async function refreshGroups() {
   }));
 }
 function openPanel(title, kind) {
-  closeMenu(); clearInterval(inviteTimer); panelKind = kind; $('panel-title').textContent = title; $('panel-body').replaceChildren();
+  closeMenu(); clearInterval(inviteTimer); $('panel').classList.toggle('image-preview-panel', kind === 'image-preview'); panelKind = kind; $('panel-title').textContent = title; $('panel-body').replaceChildren();
   if (!$('panel').open) $('panel').showModal(); busy(); return $('panel-body');
 }
 function description(text) { return element('p', 'panel-description', text); }
@@ -614,7 +675,7 @@ $('storage-settings').onclick = () => openStorage().catch(showError);
 $('network-settings').onclick = () => openNetwork().catch(showError); $('network-offline').onclick = () => openNetwork().catch(showError);
 $('create-group').onclick = openCreate; $('join-group').onclick = openJoin; $('invite-members').onclick = () => openInvite().catch(showError); $('view-members').onclick = openMembers; $('members-button').onclick = () => { if (config) openMembers(); };
 $('view-join-requests').onclick = openRequests;
-$('close-panel').onclick = () => $('panel').close(); $('panel').addEventListener('close', () => { panelKind = ''; clearInterval(inviteTimer); busy(); });
+$('close-panel').onclick = () => $('panel').close(); $('panel').addEventListener('close', () => { panelKind = ''; activePreviewId = null; previewGeneration++; $('panel-body').replaceChildren(); clearInterval(inviteTimer); busy(); });
 $('panel').addEventListener('click', event => { if (event.target === $('panel')) { const rect = $('panel').getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) $('panel').close(); } });
 $('choose-file').onclick = async () => {
   try { await bridge?.setNativeDialogBusy?.(true); $('file-input').click(); }

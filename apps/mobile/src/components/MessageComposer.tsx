@@ -1,4 +1,5 @@
 import React from 'react';
+import { ArrowUp } from 'lucide-react-native';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import type { TransferItem } from '../transfers';
 import { IconButton } from './ui';
@@ -13,12 +14,12 @@ type Props = {
 
 export function MessageComposer(props: Props) {
   return <View style={s.composer}>
-    <IconButton glyph="＋" label="添加文件到待发送" onPress={props.onChooseFiles} disabled={props.busy} />
+    <IconButton icon="plus" label="添加文件到待发送" onPress={props.onChooseFiles} disabled={props.busy} />
     <View style={s.field}>
       <ImageDrafts items={props.files} disabled={props.busy} onRemove={props.onRemoveImage} />
       <NativeComposerInput key={props.groupId} style={s.input} value={props.text} onChangeText={props.onChangeText} onPasteImage={props.onPasteImage} />
     </View>
-    <Pressable accessibilityRole="button" accessibilityLabel={props.files.length ? `发送消息和 ${props.files.length} 份文件到${props.groupName}` : '发送消息'} accessibilityState={{ disabled: !props.canSend }} disabled={!props.canSend} onPress={props.onSend} style={({ pressed }) => [s.send, !props.canSend && { opacity: .4 }, pressed && { opacity: .7 }]}><Text style={s.arrow}>↑</Text></Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel={props.files.length ? `发送消息和 ${props.files.length} 份文件到${props.groupName}` : '发送消息'} accessibilityState={{ disabled: !props.canSend }} disabled={!props.canSend} onPress={props.onSend} style={({ pressed }) => [s.send, !props.canSend && { opacity: .4 }, pressed && { opacity: .7 }]}><ArrowUp size={22} strokeWidth={1.8} color="#fff" accessible={false} /></Pressable>
   </View>;
 }
 const s = StyleSheet.create({

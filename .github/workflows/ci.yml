@@ -23,6 +23,6 @@ jobs:
       - run: pnpm test
       - run: pnpm mobile:check
       - run: pnpm mobile:export
+  # Main builds also publish an APK artifact and warm the cache for tag releases.
   android:
-    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/android.yml

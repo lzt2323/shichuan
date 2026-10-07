@@ -5,6 +5,7 @@ const fs = require('node:fs/promises');
 const { randomUUID, createHash } = require('node:crypto');
 const { createNetworkTransferScope } = require('./network-transfers.cjs');
 const { readClipboardImage } = require('./clipboard-image.cjs');
+const { canPreview, imagePreview } = require('./image-preview.cjs');
 const networkTransfers = createNetworkTransferScope();
 const { initialBounds, createWindowController } = require('./window-controller.cjs');
 
@@ -254,6 +255,18 @@ function registerIPC() {
   handle('window:busy', (record, value) => { record.control.setBusy('ui', value); return true; });
   handle('window:native-busy', (record, value) => { record.control.setBusy('native', Boolean(value)); return true; });
   handle('window:close', record => { record.win.hide(); return true; });
+  handle('file:preview', async (record, id, full) => {
+    if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)) throw new Error('文件编号不正确');
+    const hosted = manager.getHostedInbox(record.groupId);
+    const message = hosted ? hosted.fileFor(id)?.message : await manager.authenticated(record.groupId, `/api/messages/${id}`);
+    if (!canPreview(message)) throw new Error('该图片暂不支持预览，请保存后打开');
+    const file = await prepareFile(record, id), unpin = pinCache(file);
+    try {
+      const stat = await fs.stat(file);
+      if (stat.size !== message.size) throw new Error('图片校验失败，请重新接收');
+      return imagePreview(await fs.readFile(file), message, nativeImage, full === true);
+    } finally { unpin(); }
+  });
   handle('file:prepare', async (record, id) => { await prepareFile(record, id); return true; });
   handle('file:reveal', async (record, id) => { shell.showItemInFolder(await prepareFile(record, id)); });
   handle('file:open', async (record, id) => { const error = await shell.openPath(await prepareFile(record, id)); if (error) throw new Error(error); });
