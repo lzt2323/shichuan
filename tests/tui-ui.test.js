@@ -552,3 +552,18 @@ test('join request arrows preview actions and Enter confirms the selected respon
   await ui.key(keys.enter);
   assert.deepEqual(ui.calls.find(call => call.method === 'respond')?.params, { group: 'a', requestId: 'approval-1', allow: false });
 });
+
+test('arrow at the oldest loaded message fetches an earlier page and keeps selected message stable', async t => {
+  const initial = snapshot();
+  initial.state.messages = [{ id: 'recent', sequence: 101, type: 'text', text: '当前消息', senderId: 'self', createdAt: '2026-10-07T00:00:00Z' }];
+  initial.state.history = { hasMore: true, before: '101', latest: 101, total: 101 };
+  const loaded = { ...initial.state, messages: [{ id: 'older', sequence: 1, type: 'text', text: '更早的消息', senderId: 'self', createdAt: '2026-10-07T00:00:00Z' }, ...initial.state.messages], history: { hasMore: false, before: '1', latest: 101, total: 101 } };
+  const ui = await mount(t, 80, 24, { snapshot: initial, request: async method => method === 'history' ? loaded : undefined });
+  await ui.key(keys.up);
+  assert.deepEqual(ui.calls.find(c => c.method === 'history').params, { group: 'a' });
+  assert.match(ui.frame(), /已加载全部可用消息/);
+  await ui.key(keys.up);
+  await ui.key(keys.right);
+  assert.match(ui.frame(), /更早的消息/);
+  assert.equal(ui.calls.filter(c => c.method === 'history').length, 1);
+});

@@ -260,3 +260,33 @@ test('an API request never sends newly paired credentials to an endpoint proved 
   release(); await rejected;
   assert.ok(!calls.some(call => call.url === host.baseUrl + '/api/state' && call.headers['X-Room-Key'] === updated.key));
 });
+
+
+test('paired QR updates a changed address without consuming invitations or replacing authorization', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pickdrop-mobile-qr-'));
+  const metadata = { id: randomUUID(), name: '已配对群', hostDeviceId: randomUUID(), authVersion: 2 };
+  let inbox = await createInboxServer({ dataDir: dir, host: '127.0.0.1', group: metadata });
+  const storage = memory(), requests = [];
+  const mobile = createMobileClient({ storage, randomUUID, fetchImpl: async (url, options) => { requests.push(String(url)); return fetch(url, options); } });
+  t.after(async () => { mobile.close(); await inbox.close(); await fs.rm(dir, { recursive: true, force: true }); });
+  await mobile.init(); const group = await pair(mobile, { inbox, group: metadata, baseUrl: inbox.baseUrl });
+  const identity = mobile.device.id; await inbox.close();
+  inbox = await createInboxServer({ dataDir: dir, host: '127.0.0.1', group: metadata });
+  requests.length = 0;
+  const updated = await mobile.joinLink(`${inbox.baseUrl}/#invite=000000&group=${group.id}`);
+  assert.deepEqual(updated, { ...group, baseUrl: inbox.baseUrl });
+  assert.equal(mobile.device.id, identity);
+  assert.equal(requests.some(url => url.includes('/api/pair/')), false);
+  assert.deepEqual(JSON.parse(storage.data.get('pickdrop-group-v2-' + group.id)), updated);
+});
+
+test('paired QR for a replacement host never falls through to pairing or persists the hinted address', async t => {
+  const env = await setup(t), host = await env.host(), storage = memory(), mobile = await env.mobile(storage);
+  const group = await pair(mobile, host), previous = storage.data.get('pickdrop-group-v2-' + group.id);
+  const replacement = await env.host();
+  await assert.rejects(mobile.joinLink(`${replacement.baseUrl}/#invite=000000&group=${group.id}`), /身份校验失败/);
+  assert.equal(storage.data.get('pickdrop-group-v2-' + group.id), previous);
+  assert.equal(mobile.getGroup(group.id).key, group.key);
+  assert.equal(replacement.inbox.pairing.list().length, 0);
+  assert.equal(await mobile.reconnectInvite(inviteLink(replacement)), null);
+});

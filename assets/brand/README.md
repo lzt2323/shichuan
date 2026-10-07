@@ -13,6 +13,7 @@ fonts, filters, gradients, or third-party logo assets in the SVGs.
 | `mark-mono.svg`, `mark-mono.png` | Black one-color mark; transparent, PNG 1024×1024 |
 | `app-icon.svg`, `app-icon.png` | Ivory mark on rounded teal tile; transparent outer corners, PNG 1024×1024 |
 | `app-icon-{512,256,128,64,32,16}.png` | Raster exports at the named sizes |
+| `mac-icon.svg`, `mac-icon.png`, `mac-icon-{512,256,128,64,32,16}.png` | macOS Dock tile occupies 420/512 of the canvas, with transparent margins and a subtle offset shadow |
 | `mobile-icon.svg`, `mobile-icon.png` | Fully opaque square tile, PNG 1024×1024; platform applies its own mask |
 | `adaptive-foreground.svg`, `adaptive-foreground.png` | Transparent Android foreground; 1024×1024 with reduced central symbol |
 | `monochrome-icon.svg`, `monochrome-icon.png` | White Android themed-icon mask; same alignment as adaptive foreground |

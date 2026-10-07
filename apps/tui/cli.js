@@ -26,7 +26,7 @@ pickdrop invite --group "工作群"   显示一次性邀请码和完整链接
 pickdrop requests --group "工作群" 查看待批准的设备
 pickdrop approve REQUEST_ID --group "工作群" [--deny]
 pickdrop message "你好" --group "工作群"
-pickdrop messages --group "工作群" 查看文件 ID 与消息
+pickdrop messages --group "工作群" [--before 游标] 查看最近 100 条或更早历史
 pickdrop send ./file.zip --group "工作群" [--wait]
 pickdrop receive FILE_ID --group "工作群" [--dir ~/Downloads] [--wait]
 pickdrop receive --all --group "工作群" [--dir ~/Downloads] [--wait]
@@ -37,7 +37,8 @@ pickdrop network --interface eth0 --address 192.168.1.20
 pickdrop service install           写入可选 systemd 用户服务（不会自动启用）
 
 后台已启动时，退出 TUI 不会停止它。CLI 操作前请先 pickdrop start。
-发送成功表示文件已存入群主机；接收文件校验 SHA-256，同名另存。
+发送成功表示文件已存入群主机；接收同名文件另存。
+receive --all 逐页接收全部历史文件，使用一个任务依次保存。
 接收默认沿用上次保存目录，首次为 ~/Downloads/拾传。
 SSH 下文件属于远端 Linux。传输取消后重试会从头开始，不支持断点续传。
 `;
@@ -53,7 +54,7 @@ async function waitTasks(ids) {
 function unitQuote(value) { return '"' + value.replace(/%/g, '%%').replace(/[\\"]/g, '\\$&') + '"'; }
 async function main() {
   const { values: flags, positionals } = parseArgs({ allowPositionals: true, options: {
-    help: { type: 'boolean', short: 'h' }, version: { type: 'boolean' }, group: { type: 'string' }, link: { type: 'string' }, code: { type: 'string' }, address: { type: 'string' }, dir: { type: 'string' }, 'bin-dir': { type: 'string' }, interface: { type: 'string' }, auto: { type: 'boolean' }, all: { type: 'boolean' }, deny: { type: 'boolean' }, wait: { type: 'boolean' }, foreground: { type: 'boolean' }, background: { type: 'boolean' },
+    help: { type: 'boolean', short: 'h' }, version: { type: 'boolean' }, group: { type: 'string' }, before: { type: 'string' }, link: { type: 'string' }, code: { type: 'string' }, address: { type: 'string' }, dir: { type: 'string' }, 'bin-dir': { type: 'string' }, interface: { type: 'string' }, auto: { type: 'boolean' }, all: { type: 'boolean' }, deny: { type: 'boolean' }, wait: { type: 'boolean' }, foreground: { type: 'boolean' }, background: { type: 'boolean' },
   } });
   const [command, ...args] = positionals;
   if (flags.help || command === 'help') return print(help);
@@ -108,7 +109,7 @@ async function main() {
   if (command === 'requests') return print((await rpc('snapshot', { group })).requests);
   if (command === 'approve') return print(await rpc('respond', { group, requestId: args[0], allow: !flags.deny }));
   if (command === 'message') return print(await rpc('text', { group, text: args.join(' ') }));
-  if (command === 'messages') return print(await rpc('messages', { group }));
+  if (command === 'messages') return print(await rpc('messages', { group, before: flags.before }));
   if (command === 'cancel' || command === 'retry') return print(await rpc(command, { id: args[0] }));
   if (command === 'send' || command === 'receive') {
     const tasks = await rpc(command, command === 'send' ? { group, files: args.map(file => expandPath(file)) } : { group, messageId: args[0], all: flags.all, ...(flags.dir !== undefined ? { directory: expandPath(flags.dir) } : {}) });

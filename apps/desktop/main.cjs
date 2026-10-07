@@ -1,26 +1,33 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, nativeImage, clipboard, Menu, Tray, session } = require('electron');
 const path = require('node:path');
 const os = require('node:os');
-const http = require('node:http'), https = require('node:https');
 const fs = require('node:fs/promises');
-const { createWriteStream, createReadStream } = require('node:fs');
 const { randomUUID, createHash } = require('node:crypto');
-const { Readable, Transform } = require('node:stream');
-const { pipeline } = require('node:stream/promises');
 const { createNetworkTransferScope } = require('./network-transfers.cjs');
 const { readClipboardImage } = require('./clipboard-image.cjs');
 const networkTransfers = createNetworkTransferScope();
 const { initialBounds, createWindowController } = require('./window-controller.cjs');
 
-let manager, config, configPath, tray, uiOrigin, uiServer, networkProxy, quitting = false, saveQueue = Promise.resolve();
+let manager, config, configPath, tray, uiOrigin, uiServer, networkProxy, startupPromise, quitting = false, quitFinished = false, saveQueue = Promise.resolve();
 const windows = new Map(), opening = new Map(), prepared = new Map(), pending = new Map();
+const cachePins = new Set(), pinCounts = new Map();
+function pinCache(file) {
+  cachePins.add(file); pinCounts.set(file, (pinCounts.get(file) || 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return; released = true;
+    const count = pinCounts.get(file) - 1;
+    if (count) pinCounts.set(file, count); else { pinCounts.delete(file); cachePins.delete(file); }
+  };
+}
+let cacheSweep = Promise.resolve(), cacheTimer;
 const dragIcon = nativeImage.createFromPath(path.join(__dirname, 'assets/drag-icon.png'));
 function saveConfig() {
-  const serialized = JSON.stringify(config, null, 2);
+  const snapshot = structuredClone(config);
   saveQueue = saveQueue.catch(() => {}).then(async () => {
+    const { writeJsonWithBackup } = await import('../../server/persistence.js');
     await fs.mkdir(path.dirname(configPath), { recursive: true, mode: 0o700 });
-    await fs.writeFile(configPath + '.tmp', serialized, { mode: 0o600 });
-    await fs.rename(configPath + '.tmp', configPath);
+    await writeJsonWithBackup(configPath, snapshot);
   });
   return saveQueue;
 }
@@ -50,10 +57,11 @@ function bootstrap(record) {
 function cacheKey(group, id) { return `${group.id}|${group.key}|${id}`; }
 async function prepareFile(record, id) {
   if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/i.test(id)) throw new Error('文件编号不正确');
+  await cacheSweep.catch(() => {});
   let group = groupFor(record); const key = cacheKey(group, id);
   const requestHeaders = { 'X-Room-Key': group.key, 'X-Device-Id': config.device.id };
   if (prepared.has(key)) {
-    try { await fs.access(prepared.get(key)); return prepared.get(key); }
+    try { const file = prepared.get(key); await fs.utimes(file, new Date(), new Date()); return file; }
     catch (error) { if (error.code !== 'ENOENT') throw error; prepared.delete(key); }
   }
   if (pending.has(key)) return pending.get(key);
@@ -70,36 +78,32 @@ async function prepareFile(record, id) {
     const signal = cancellation.signal; downloadSignal = signal;
     group = await manager.resolveGroup(group.id);
     if (!group.online) throw new Error('群主机离线，请检查所选网络');
-    const state = await manager.authenticated(group.id, '/api/state', { signal }), message = state.messages.find(item => item.id === id && item.type === 'file');
-    if (!message) throw new Error('找不到这个文件');
-    if (!/^[a-f0-9]{64}$/i.test(message.sha256)) throw new Error('文件校验信息不正确');
+    let message;
+    try { message = await manager.authenticated(group.id, `/api/messages/${id}`, { signal }); }
+    catch (error) {
+      if (error.status !== 404) throw error;
+      const state = await manager.authenticated(group.id, '/api/state', { signal });
+      message = state.messages.find(item => item.id === id && item.type === 'file');
+    }
+    if (!message || message.deleted) throw new Error('文件已被主机清理');
     const { safeFileName } = await import('../../shared/protocol.js');
+    const { downloadVerified, verifyLocalFile } = await import('../../shared/download.js');
     const groupDir = createHash('sha256').update(group.id).digest('hex');
     const dir = path.join(app.getPath('userData'), 'received', groupDir, id);
-    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-    const output = path.join(dir, safeFileName(message.fileName)), partial = output + '.part';
+    await cacheSweep.catch(() => {}); const unpin = pinCache(dir);
     try {
-      const bytes = await fs.stat(output);
-      if (bytes.size === message.size) {
-        const hash = createHash('sha256');
-        for await (const chunk of createReadStream(output)) hash.update(chunk);
-        if (hash.digest('hex') === message.sha256) { prepared.set(key, output); return output; }
+      await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+      const output = path.join(dir, safeFileName(message.fileName)), partial = output + '.part';
+      if (await verifyLocalFile(output, message)) {
+        await fs.utimes(output, new Date(), new Date()); prepared.set(key, output); return output;
       }
-    } catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const download = await new Promise((resolve, reject) => {
-      const target = new URL(`${group.baseUrl}/api/files/${id}`), transport = target.protocol === 'https:' ? https : http;
-      const request = transport.get(target, { headers: requestHeaders, localAddress: manager.getNetwork().selected.address, signal, timeout: 60 * 60 * 1000 }, resolve);
-      request.on('timeout', () => request.destroy(new Error('文件接收超时'))); request.on('error', reject);
-    });
-    if (download.statusCode !== 200) { download.destroy(); throw new Error('文件接收失败'); }
-    const hash = createHash('sha256');
-    let bytes = 0;
-    const meter = new Transform({ transform(chunk, enc, callback) { bytes += chunk.length; hash.update(chunk); callback(null, chunk); } });
-    try {
-      await pipeline(download, meter, createWriteStream(partial, { mode: 0o600 }), { signal });
-      if (hash.digest('hex') !== message.sha256 || bytes !== message.size) throw new Error('文件完整性校验失败，请重新接收');
+      await fs.rm(partial, { force: true });
+      await downloadVerified({ url: `${group.baseUrl}/api/files/${id}`, headers: requestHeaders,
+        destination: partial, size: message.size, sha256: message.sha256, signal,
+        localAddress: manager.getNetwork().selected.address });
       await fs.rename(partial, output); prepared.set(key, output); return output;
-    } catch (error) { await fs.rm(partial, { force: true }); throw error; }
+    } finally { unpin(); }
+
   })().catch(error => { if (downloadSignal?.aborted) throw new Error('所选网络已断开，文件接收已停止，请重新连接后重试'); throw error; }).finally(() => release?.());
   pending.set(key, operation);
   try { return await operation; } finally { pending.delete(key); }
@@ -117,8 +121,9 @@ function updateTray() {
     { label: '退出拾传', click: () => app.quit() },
   ]));
 }
-function showError(error) { console.error(error); dialog.showErrorBox('拾传', error.message || String(error)); }
+function showError(error) { console.error(error); if (!quitting) dialog.showErrorBox('拾传', error.message || String(error)); }
 async function openGroup(groupId) {
+  if (quitting) return;
   if (typeof groupId !== 'string' || !manager.listGroups().some(group => group.id === groupId)) throw new Error('群不存在');
   const existing = windows.get(groupId);
   if (existing && !existing.win.isDestroyed()) { existing.control.expand(true); return publicGroup(groupFor(existing)); }
@@ -126,11 +131,12 @@ async function openGroup(groupId) {
   const operation = (async () => {
     // Discovery may be temporarily unavailable; keep the saved group available offline.
     try { await manager.resolveGroup(groupId); } catch (error) { console.warn('Group discovery:', error.message); }
+    if (quitting) return;
     const group = manager.listGroups().find(item => item.id === groupId);
     const saved = config.windows[groupId];
     const win = new BrowserWindow({
       ...initialBounds(saved, windows.size), minWidth: 280, minHeight: 340, maxWidth: 900, maxHeight: 1100,
-      title: `${group.name} · 拾传`, icon: path.join(__dirname, 'assets/icon.png'), frame: false, roundedCorners: false,
+      title: `${group.name} · 拾传`, icon: path.join(__dirname, 'assets', process.platform === 'darwin' ? 'mac-icon.png' : 'icon.png'), frame: false, roundedCorners: false,
       transparent: true, backgroundColor: '#00000000', hasShadow: false, fullscreenable: false, resizable: false,
       autoHideMenuBar: true, alwaysOnTop: true, show: false,
       webPreferences: { partition: 'persist:pickdrop-groups', preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true },
@@ -146,18 +152,51 @@ async function openGroup(groupId) {
     win.webContents.on('will-navigate', guardNavigation); win.webContents.on('will-redirect', guardNavigation);
     win.webContents.on('did-finish-load', () => control.emit());
     win.on('close', event => { if (!quitting) { event.preventDefault(); win.hide(); } });
-    win.on('closed', () => { record.transferReleases.forEach(release => release()); windows.delete(groupId); });
+    win.on('closed', () => { record.releaseDragPin?.(); record.transferReleases.forEach(release => release()); windows.delete(groupId); });
     win.webContents.on('render-process-gone', () => { record.transferReleases.splice(0).forEach(release => release()); });
     try { await win.loadURL(uiOrigin); }
     catch (error) { win.destroy(); throw error; }
+    if (quitting) { if (!win.isDestroyed()) win.destroy(); return; }
     win.show(); control.restore(); control.emit(); updateTray();
     return publicGroup(groupFor(record));
   })();
   opening.set(groupId, operation);
   try { return await operation; } finally { opening.delete(groupId); }
 }
+function cacheRoot(groupId) {
+  const root = path.join(app.getPath('userData'), 'received');
+  return groupId ? path.join(root, createHash('sha256').update(groupId).digest('hex')) : root;
+}
+function sweepCache(groupId, clear = false) {
+  const root = cacheRoot(groupId);
+  cacheSweep = cacheSweep.catch(() => {}).then(async () => {
+    const { cleanCache } = await import('../../server/cache.js');
+    const result = await cleanCache(root, { clear, protectedPaths: cachePins, boundary: app.getPath('userData') });
+    for (const [key, file] of prepared) if (file.startsWith(root + path.sep)) {
+      if (!await fs.stat(file).catch(() => null)) prepared.delete(key);
+    }
+    if (result.removedFiles) broadcast('storage:cache-cleared', { groupId: groupId || null });
+    return result;
+  });
+  return cacheSweep;
+}
 function registerIPC() {
   handle('app:bootstrap', bootstrap);
+  handle('storage:get', async record => {
+    const { cacheStats, CACHE_POLICY } = await import('../../server/cache.js');
+    return { cache: await cacheStats(cacheRoot(record.groupId), { boundary: app.getPath('userData') }), hosted: manager.getHostedInbox(record.groupId)?.storage() || { bytes: 0, files: 0 }, policy: CACHE_POLICY };
+  });
+  handle('storage:clear-cache', record => sweepCache(record.groupId, true));
+  handle('storage:host-files', (record, options = {}) => manager.getHostedInbox(record.groupId)?.listFiles({ before: options?.before }) || []);
+  handle('storage:delete-host-files', async (record, ids) => {
+    const inbox = manager.getHostedInbox(record.groupId);
+    if (!inbox) throw new Error('仅群主机可清理原文件');
+    if (!Array.isArray(ids) || !ids.length || ids.length > 100) throw new Error('请选择 1 至 100 个文件');
+    if (ids.some(id => { const file = inbox.fileFor(id)?.path; return file && cachePins.has(file); })) throw new Error('文件正在使用，请稍后清理');
+    const result = await inbox.deleteFiles(ids);
+    for (const id of ids) prepared.delete(cacheKey(groupFor(record), id));
+    return result;
+  });
   handle('group:list', publicGroups);
   handle('group:create', async (_record, name) => { const group = await manager.createGroup(name); await openGroup(group.id); return publicGroup(group); });
   handle('group:open', (_record, id) => openGroup(id));
@@ -172,6 +211,7 @@ function registerIPC() {
     let next = manager.listGroups()[0];
     if (!next) next = await manager.createGroup('我的设备');
     await openGroup(next.id);
+    await sweepCache(record.groupId, true);
     record.win.destroy();
     delete config.windows[record.groupId]; await saveConfig(); updateTray();
     return true;
@@ -212,20 +252,22 @@ function registerIPC() {
   handle('window:dock', record => record.control.dock());
   handle('window:expand', record => record.control.expand(true));
   handle('window:busy', (record, value) => { record.control.setBusy('ui', value); return true; });
+  handle('window:native-busy', (record, value) => { record.control.setBusy('native', Boolean(value)); return true; });
   handle('window:close', record => { record.win.hide(); return true; });
-  handle('window:minimize', record => { record.win.hide(); return true; });
   handle('file:prepare', async (record, id) => { await prepareFile(record, id); return true; });
   handle('file:reveal', async (record, id) => { shell.showItemInFolder(await prepareFile(record, id)); });
   handle('file:open', async (record, id) => { const error = await shell.openPath(await prepareFile(record, id)); if (error) throw new Error(error); });
   handle('file:save', async (record, id) => {
-    record.control.setBusy('native', true);
+    if (record.saving) throw new Error('请先完成当前保存');
+    record.saving = true; record.control.setBusy('native', true);
+    let file, unpin;
     try {
-      const file = await prepareFile(record, id);
+      file = await prepareFile(record, id); unpin = pinCache(file);
       const choice = await dialog.showSaveDialog(record.win, { defaultPath: path.join(app.getPath('downloads'), path.basename(file)) });
       if (choice.canceled) return false;
       if (path.resolve(choice.filePath) !== path.resolve(file)) await fs.copyFile(file, choice.filePath);
       return true;
-    } finally { record.control.setBusy('native', false); }
+    } finally { unpin?.(); record.saving = false; record.control.setBusy('native', false); }
   });
   ipcMain.on('window:activity', (event, type, value) => {
     const record = recordFor(event); if (!record) return;
@@ -236,27 +278,31 @@ function registerIPC() {
     if (type === 'pointer') record.control.pointer(Boolean(value));
     if (type === 'input') record.control.setBusy('input', value);
     if (type === 'drag') record.control.dragActivity(value);
-    if (type === 'drag-end') record.control.nativeDragEnd();
+    if (type === 'drag-end') { record.releaseDragPin?.(); record.releaseDragPin = null; record.dragFile = null; record.control.nativeDragEnd(); }
   });
   ipcMain.on('file:drag', (event, id) => {
     const record = recordFor(event); if (!record || typeof id !== 'string') return;
     const file = prepared.get(cacheKey(groupFor(record), id));
     if (!file) return;
+    record.releaseDragPin?.(); record.releaseDragPin = pinCache(file); record.dragFile = file;
     record.control.nativeDragStart();
     try { event.sender.startDrag({ file, icon: dragIcon }); }
-    catch (error) { console.error('Native drag:', error.message); record.control.nativeDragEnd(); }
+    catch (error) { record.releaseDragPin?.(); record.releaseDragPin = null; record.dragFile = null; console.error('Native drag:', error.message); record.control.nativeDragEnd(); }
   });
 }
 
 app.setName('PickDrop');
 if (process.env.PICKDROP_USER_DATA) app.setPath('userData', path.resolve(process.env.PICKDROP_USER_DATA));
 if (!app.requestSingleInstanceLock()) app.quit();
-else app.whenReady().then(async () => {
+else startupPromise = app.whenReady().then(async () => {
+  if (quitting) return;
   try {
     const dataDir = app.getPath('userData');
     configPath = path.join(dataDir, 'preferences.json');
-    try { config = JSON.parse(await fs.readFile(configPath, 'utf8')); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; config = {}; }
+    const { readJsonWithBackup } = await import('../../server/persistence.js');
+    config = await readJsonWithBackup(configPath, value => value && typeof value === 'object' && (!value.device || /^[a-f0-9-]{36}$/i.test(value.device.id)) && (!value.windows || typeof value.windows === 'object')) || {};
+    await sweepCache();
+    cacheTimer = setInterval(() => sweepCache().catch(error => console.error('缓存清理失败:', error.message)), 15 * 60 * 1000); cacheTimer.unref();
     config.device ||= { id: randomUUID(), name: os.hostname().split('.')[0], kind: 'desktop' };
     config.windows ||= {};
     await saveConfig();
@@ -290,13 +336,27 @@ else app.whenReady().then(async () => {
     ]));
     // Each remembered group is independent; closing a window only hides it.
     for (const group of groups) await openGroup(group.id);
-  } catch (error) { console.error(error); dialog.showErrorBox('拾传无法启动', error.message); app.quit(); }
+  } catch (error) { console.error(error); if (!quitting) { dialog.showErrorBox('拾传无法启动', error.message); app.quit(); } }
 });
 app.on('window-all-closed', () => {});
 app.on('activate', () => { const first = manager?.listGroups()[0]; if (first) openGroup(first.id).catch(showError); });
 app.on('second-instance', () => { const first = manager?.listGroups()[0]; if (first) openGroup(first.id).catch(showError); });
 app.on('before-quit', event => {
+  if (quitFinished) return;
+  event.preventDefault();
   if (quitting) return;
-  event.preventDefault(); quitting = true; networkTransfers.close();
-  Promise.allSettled([networkProxy?.close(), manager?.close(), uiServer?.close(), saveQueue]).finally(() => { tray?.destroy(); app.quit(); });
+  quitting = true;
+  // Stop renderers before closing their endpoints. Otherwise their reconnects
+  // (or a second-instance activation) can reopen an already stopped UI server.
+  for (const win of BrowserWindow.getAllWindows()) win.destroy();
+  (async () => {
+    // Quit may arrive while asynchronous startup/openGroup is still in flight.
+    // Their quitting guards prevent creating/showing more windows; then all
+    // resources they created can be closed, and closed-window state is flushed.
+    await startupPromise;
+    await Promise.allSettled([...opening.values()]);
+    clearInterval(cacheTimer); networkTransfers.close(); tray?.destroy();
+    await Promise.allSettled([networkProxy?.close(), manager?.close({ force: true }), uiServer?.close({ force: true }), cacheSweep]);
+    await saveQueue;
+  })().catch(error => console.error('退出清理失败:', error)).finally(() => { quitFinished = true; app.quit(); });
 });

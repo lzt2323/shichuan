@@ -1,7 +1,7 @@
 export type Device = { id: string; name: string; kind: 'desktop' | 'ios' | 'android' | 'web'; online?: boolean };
 export type Group = { id: string; name: string; baseUrl: string; key: string; hostDeviceId?: string; legacy?: boolean; authVersion?: 2; membershipRevoked?: boolean };
-export type Message = { id: string; type: 'text' | 'file'; text?: string; fileName?: string; size?: number; mime?: string; sha256?: string; senderId: string; senderName: string; createdAt: string };
-export type GroupState = { messages: Message[]; devices: Device[]; maxFileBytes?: number; type?: 'state' };
+export type Message = { id: string; type: 'text' | 'file'; text?: string; fileName?: string; size?: number; mime?: string; sha256?: string; senderId: string; senderName: string; createdAt: string; seq?: string; deleted?: boolean };
+export type GroupState = { messages: Message[]; devices: Device[]; maxFileBytes?: number; history?: { hasMore: boolean; before: string | null; latest: string | null; total: number }; mode?: 'snapshot' | 'delta'; type?: 'state' };
 export type ConnectionStatus = 'connecting' | 'online' | 'offline' | 'paused';
 export type JoinStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'revoked';
 export type JoinTicket = { status: 'pending'; requestId: string; pollToken: string; groupId: string; groupName: string; hostDeviceId: string; expiresAt: number; baseUrl: string };
@@ -24,9 +24,10 @@ export type MobileClient = {
   setActiveGroup(id: string | null): Promise<void>;
   removeGroup(id: string): Promise<void>;
   rename(name: string): Promise<Device>;
-  updateDiscovery(records: Array<{ groupId: string; hostDeviceId: string; baseUrl: string }>): void;
+  updateDiscovery(records: Array<{ groupId: string; hostDeviceId: string; baseUrl: string; candidateUrls?: string[] }>): void;
   resolveGroup(id: string, options?: Pick<RequestOptions, 'signal'>): Promise<Group>;
   reconnectAt(id: string, baseUrl: string, options?: Pick<RequestOptions, 'signal'>): Promise<Group>;
+  reconnectInvite(link: string, options?: Pick<RequestOptions, 'signal'>): Promise<Group | null>;
   requestJoinAt(baseUrl: string, code: string, options?: Pick<JoinOptions, 'signal'>): Promise<JoinTicket>;
   requestJoin(link: string, options?: Pick<JoinOptions, 'signal'>): Promise<JoinTicket>;
   checkJoin(ticket: JoinTicket, options?: Pick<JoinOptions, 'signal'>): Promise<{ status: JoinStatus; group?: Group }>;

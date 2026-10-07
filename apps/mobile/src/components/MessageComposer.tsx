@@ -22,9 +22,9 @@ export function MessageComposer(props: Props) {
   </View>;
 }
 const s = StyleSheet.create({
-  composer: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 9, paddingVertical: 10, gap: 5, borderTopWidth: 1, borderTopColor: '#e7effb', backgroundColor: '#fff' },
-  field: { flex: 1, minWidth: 0, borderWidth: 1, borderColor: '#e0e9f5', borderRadius: 13, overflow: 'hidden', backgroundColor: '#fff' },
+  composer: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 9, paddingVertical: 10, gap: 5, borderTopWidth: 1, borderTopColor: '#D8E7DF', backgroundColor: '#F8FAF7' },
+  field: { flex: 1, minWidth: 0, borderWidth: 1, borderColor: '#D8E7DF', borderRadius: 13, overflow: 'hidden', backgroundColor: '#F8FAF7' },
   input: { minHeight: 44, maxHeight: 112 },
-  send: { width: 44, height: 44, borderRadius: 13, backgroundColor: '#3486ff', alignItems: 'center', justifyContent: 'center', marginLeft: 3 },
+  send: { width: 44, height: 44, borderRadius: 13, backgroundColor: '#126A5A', alignItems: 'center', justifyContent: 'center', marginLeft: 3 },
   arrow: { color: '#fff', fontSize: 25 },
 });

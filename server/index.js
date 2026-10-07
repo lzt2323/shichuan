@@ -10,12 +10,15 @@ import { WebSocketServer } from 'ws';
 import QRCode from 'qrcode';
 import { safeFileName } from '../shared/protocol.js';
 import { createGroupPairing } from './pairing.js';
+import { openHistoryStore, validMessage } from './history-store.js';
+import { readJsonWithBackup, writeJsonWithBackup } from './persistence.js';
 
 const publicDir = fileURLToPath(new URL('../apps/desktop/public/', import.meta.url));
 const staticFiles = new Map([
   ['/', [path.join(publicDir, 'index.html'), 'text/html; charset=utf-8']],
   ['/app.js', [path.join(publicDir, 'app.js'), 'text/javascript; charset=utf-8']],
   ['/clipboard-images.js', [path.join(publicDir, 'clipboard-images.js'), 'text/javascript; charset=utf-8']],
+  ['/history.js', [fileURLToPath(new URL('../shared/history.js', import.meta.url)), 'text/javascript; charset=utf-8']],
   ['/styles.css', [path.join(publicDir, 'styles.css'), 'text/css; charset=utf-8']],
   ['/protocol.js', [fileURLToPath(new URL('../shared/protocol.js', import.meta.url)), 'text/javascript; charset=utf-8']],
 ]);
@@ -48,10 +51,20 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
   }
   if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Invalid room key');
   const statePath = path.join(dataDir, 'history.json');
-  let saved = { messages: [], devices: [] };
-  try { saved = JSON.parse(await fs.readFile(statePath, 'utf8')); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const messages = saved.messages;
+  const saved = await readJsonWithBackup(statePath, value => value && Array.isArray(value.devices) &&
+    value.devices.every(d => uuidPattern.test(d?.id) && typeof d.name === 'string') &&
+    (value.messages === undefined || Array.isArray(value.messages) && value.messages.every(validMessage)) &&
+    (!value.auth || [1, 2].includes(value.auth.version) && value.auth.credentials && typeof value.auth.credentials === 'object'), { recover: false }) || { devices: [] };
+  const history = await openHistoryStore(dataDir, saved.messages || [], { requireExisting: saved.version === 2 });
+  try {
+  // Only abandoned app-owned upload directories are swept; committed files are retained.
+  for (const entry of await fs.readdir(filesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !uuidPattern.test(entry.name)) continue;
+    const record = history.get(entry.name);
+    if (record && !record.deleted) continue;
+    const folder = path.join(filesDir, entry.name), info = await fs.stat(folder);
+    if (record?.deleted || Date.now() - info.mtimeMs > 24 * 60 * 60 * 1000) await fs.rm(folder, { recursive: true, force: true });
+  }
   const devices = new Map(saved.devices.map(d => [d.id, { ...d, online: false }]));
   const connections = new Map(), deviceRequests = new Map();
   let auth = saved.auth || { version: group?.authVersion === 2 ? 2 : 1, credentials: {} };
@@ -69,24 +82,27 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
     return typeof expected === 'string' && expected.length === 64 && timingSafeEqual(Buffer.from(expected), Buffer.from(tokenHash(token)));
   };
   let writeQueue = Promise.resolve();
-  let closing = false;
+  let closing = false, closePromise;
   const activeUploads = new Set(), activeDownloads = new Set();
-  let transfersPaused = false, activeTransferRequests = 0;
-  const state = () => ({ messages, devices: [...devices.values()], maxFileBytes, authVersion: auth.version });
+  let transfersPaused = false, cleanupBusy = false, activeTransferRequests = 0;
+  const summary = () => ({ devices: [...devices.values()], maxFileBytes, authVersion: auth.version });
+  const state = () => ({ ...history.page(), ...summary() });
   const persist = () => {
-    const snapshot = JSON.stringify({ messages, auth, devices: [...devices.values()].map(d => ({ ...d, online: false })) });
-    const operation = writeQueue.catch(() => {}).then(async () => {
-      const tmp = `${statePath}.${randomUUID()}.tmp`;
-      try { await fs.writeFile(tmp, snapshot, { mode: 0o600 }); await fs.rename(tmp, statePath); }
-      finally { await fs.rm(tmp, { force: true }).catch(() => {}); }
-    });
+    const snapshot = { version: 2, auth: structuredClone(auth), devices: [...devices.values()].map(d => ({ ...d, online: false })) };
+    const operation = writeQueue.catch(() => {}).then(() => writeJsonWithBackup(statePath, snapshot));
     writeQueue = operation;
     return operation;
   };
   const validKey = candidate => typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate) && timingSafeEqual(Buffer.from(candidate), Buffer.from(key));
-  const broadcast = () => {
-    const payload = JSON.stringify({ type: 'state', ...state() });
-    for (const client of wss.clients) if (client.readyState === 1) client.send(payload);
+  const broadcast = (messages = []) => {
+    if (closing) return;
+    let legacy;
+    const delta = JSON.stringify({ type: 'state', mode: 'delta', messages, ...summary(), history: history.page({ limit: 1 }).history });
+    for (const client of wss.clients) if (client.readyState === 1) {
+      // A stalled receiver must reconnect to a bounded snapshot instead of accumulating an unlimited send queue.
+      if (client.bufferedAmount > 4 * 1024 * 1024) { client.close(1013, 'reconnect to resume'); continue; }
+      client.send(client.deltaStream ? delta : (legacy ||= JSON.stringify({ type: 'state', ...state() })));
+    }
   };
   const deviceFor = req => {
     const device = devices.get(req.headers['x-device-id']);
@@ -98,8 +114,8 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
     if (!authorize(req.headers['x-device-id'], req.headers['x-room-key'])) throw fail(401, '设备授权已失效，请重新申请加入');
   };
   const fileFor = id => {
-    const message = messages.find(m => m.id === id && m.type === 'file');
-    return message ? { message, path: path.join(filesDir, id, message.fileName) } : null;
+    const message = history.get(id);
+    return message?.type === 'file' && !message.deleted ? { message, path: path.join(filesDir, id, message.fileName) } : null;
   };
 
   const registerDeviceNow = async body => {
@@ -175,6 +191,26 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
     broadcast(); return { authVersion: 2, key: token };
   });
 
+  async function deleteFiles(ids, req) {
+    if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some(id => !uuidPattern.test(id))) throw fail(400, '请选择 1 至 100 个文件');
+    if (closing || activeTransferRequests || activeUploads.size || activeDownloads.size) throw fail(409, '有文件正在传输，请稍后清理');
+    return memberOperation(async () => {
+      if (req) checkRequest(req);
+      if (activeTransferRequests || activeUploads.size || activeDownloads.size) throw fail(409, '有文件正在传输，请稍后清理');
+      cleanupBusy = true;
+      const changed = [];
+      try {
+        for (const id of new Set(ids)) {
+          const record = history.get(id); if (!record || record.type !== 'file') continue;
+          // Tombstone first: a crash cannot leave a downloadable record pointing at a removed original.
+          const updated = history.markDeleted(id); changed.push(updated);
+          await fs.rm(path.join(filesDir, id), { recursive: true, force: true });
+        }
+      } finally { cleanupBusy = false; if (changed.length) broadcast(changed); }
+      return { removed: changed.length, ...history.stats() };
+    });
+  }
+
   const server = http.createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -211,13 +247,29 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
       }
       if (group && route === '/api/members/leave' && req.method === 'POST') return json(res, 200, await removeDevice(requestingId, req));
       if ((route === '/api/files' && req.method === 'POST') || (route.startsWith('/api/files/') && req.method === 'GET')) {
-        if (closing || transfersPaused) throw fail(503, '正在切换网络，请稍后重试');
+        if (closing || transfersPaused || cleanupBusy) throw fail(503, '正在切换网络，请稍后重试');
         activeTransferRequests++;
         let released = false;
         const release = () => { if (!released) { released = true; activeTransferRequests--; } };
         res.once('finish', release); res.once('close', release);
       }
       if (route === '/api/state' && req.method === 'GET') return json(res, 200, state());
+      if (route === '/api/history' && req.method === 'GET') return json(res, 200, history.page({ before: url.searchParams.get('before'), limit: url.searchParams.get('limit') || 100 }));
+      if (route.startsWith('/api/messages/') && req.method === 'GET') {
+        const message = history.get(route.slice('/api/messages/'.length));
+        if (!message) throw fail(404, '找不到这条消息');
+        return json(res, 200, message);
+      }
+      if (route === '/api/storage' && req.method === 'GET') return json(res, 200, history.stats());
+      if (route === '/api/storage/files' && req.method === 'GET') {
+        if (!group || requestingId !== group.hostDeviceId) throw fail(403, '仅群主机可管理原文件');
+        return json(res, 200, { files: history.files({ before: url.searchParams.get('before') }), ...history.stats() });
+      }
+      if (route === '/api/storage/delete-files' && req.method === 'POST') {
+        if (!group || requestingId !== group.hostDeviceId) throw fail(403, '仅群主机可清理原文件');
+        const body = await readJson(req);
+        return json(res, 200, await deleteFiles(body.ids, req));
+      }
       if (route === '/api/qr' && req.method === 'GET') {
         const link = url.searchParams.get('link');
         if (!link || link.length > 1000) throw fail(400, '二维码地址不正确');
@@ -242,13 +294,12 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
         if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 10000) throw fail(400, '请输入 10000 字以内的内容');
         const message = { id: randomUUID(), type: 'text', text: body.text.trim(), senderId: device.id, senderName: device.name, createdAt: new Date().toISOString() };
         await memberOperation(async () => {
-          checkRequest(req); messages.push(message);
-          try { await persist(); } catch (error) { messages.splice(messages.indexOf(message), 1); throw error; }
+          checkRequest(req); Object.assign(message, history.add(message));
         });
-        broadcast(); return json(res, 201, message);
+        broadcast([message]); return json(res, 201, message);
       }
       if (route === '/api/files' && req.method === 'POST') {
-        if (closing || transfersPaused) throw fail(503, '正在切换网络，请稍后重试');
+        if (closing || transfersPaused || cleanupBusy) throw fail(503, '正在切换网络，请稍后重试');
         const device = deviceFor(req);
         const declaredLength = Number(req.headers['content-length']);
         if (Number.isFinite(declaredLength) && declaredLength > maxFileBytes) throw fail(413, '文件超过当前大小上限');
@@ -270,10 +321,9 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
             checkRequest(req);
             const message = { id, type: 'file', fileName, size, mime: String(req.headers['content-type'] || 'application/octet-stream').slice(0, 100), sha256: hash.digest('hex'), senderId: device.id, senderName: device.name, createdAt: new Date().toISOString() };
             await memberOperation(async () => {
-              checkRequest(req); messages.push(message);
-              try { await persist(); } catch (error) { messages.splice(messages.indexOf(message), 1); throw error; }
+              checkRequest(req); Object.assign(message, history.add(message));
             });
-            broadcast(); json(res, 201, message);
+            broadcast([message]); json(res, 201, message);
           } catch (error) { await fs.rm(dir, { recursive: true, force: true }); throw error; }
         })();
         activeUploads.add(upload);
@@ -281,7 +331,7 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
         return;
       }
       if (route.startsWith('/api/files/') && req.method === 'GET') {
-        if (closing || transfersPaused) throw fail(503, '正在切换网络，请稍后重试');
+        if (closing || transfersPaused || cleanupBusy) throw fail(503, '正在切换网络，请稍后重试');
         const record = fileFor(route.slice('/api/files/'.length));
         if (!record) throw fail(404, '找不到这个文件');
         const stat = await fs.stat(record.path).catch(() => { throw fail(404, '文件已从磁盘移除'); });
@@ -302,7 +352,7 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
     const device = devices.get(url.searchParams.get('device'));
     if (url.pathname !== '/api/events' || !authorize(url.searchParams.get('device'), url.searchParams.get('key')) || !device) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; }
     wss.handleUpgrade(req, socket, head, client => {
-      client.isAlive = true;
+      client.isAlive = true; client.deltaStream = url.searchParams.get('stream') === '2';
       const set = connections.get(device.id) || new Set();
       set.add(client); connections.set(device.id, set); device.online = true;
       client.on('pong', () => { client.isAlive = true; });
@@ -313,6 +363,7 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
         if (!set.size && currentDevice) currentDevice.online = false;
         broadcast();
       });
+      if (client.deltaStream) client.send(JSON.stringify({ type: 'state', mode: 'snapshot', ...state() }));
       broadcast();
     });
   });
@@ -325,7 +376,7 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
   heartbeat.unref();
   if (listen) {
     try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, host, resolve); }); }
-    catch (error) { clearInterval(heartbeat); wss.close(); throw error; }
+    catch (error) { clearInterval(heartbeat); wss.close(); history.close(); throw error; }
   }
   const actualPort = server.address()?.port || null;
   const bindAddress = host === '0.0.0.0' ? '127.0.0.1' : host;
@@ -337,18 +388,23 @@ export async function createInboxServer({ dataDir, port = 0, host = '0.0.0.0', l
     pauseTransfers(value = true) { transfersPaused = Boolean(value); },
     pairingLinks: addresses.map(address => `${address}/#key=${key}`),
     fileFor, state, registerDevice, pairing, ensureHostDevice,
-    getHostCredential: () => auth.version === 2 ? hostCredential : key,
+    storage: () => history.stats(), listFiles: options => history.files(options), deleteFiles,
     getAuthVersion: () => auth.version,
     secureMembers,
     async close({ force = false } = {}) {
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
       closing = true; clearInterval(heartbeat);
       for (const client of wss.clients) client.terminate();
       if (server.listening) await new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); if (force) server.closeAllConnections(); });
       await Promise.allSettled([...activeUploads, ...activeDownloads]);
       await memberWrites.catch(() => {}); await writeQueue.catch(() => {});
-      wss.close();
+      wss.close(); history.close();
+      })();
+      return closePromise;
     },
   };
+  } catch (error) { history.close(); throw error; }
 }
 
 
@@ -364,5 +420,5 @@ export async function createDesktopUiServer() {
     } catch { if (!res.headersSent) res.writeHead(500); res.end(); }
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  return { baseUrl: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); }) };
+  return { baseUrl: `http://127.0.0.1:${server.address().port}`, close: ({ force = false } = {}) => new Promise(resolve => { server.close(resolve); server.closeIdleConnections(); if (force) server.closeAllConnections(); }) };
 }

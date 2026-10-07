@@ -7,6 +7,7 @@ import WebSocket from 'ws';
 import { createGroupManager } from '../../server/groups.js';
 import { locations, privateDirectory, groupBy, completePath } from './common.js';
 import { TransferQueue } from './transfers.js';
+import { mergeState, prependHistory } from '../../shared/history.js';
 import { loadPreferences, validateDownloadDirectory } from './preferences.js';
 
 const publicGroup = ({ key, ...group }) => group;
@@ -40,8 +41,8 @@ export async function createDaemon({ paths = locations(), managerOptions = {} } 
   catch (error) { await fs.rm(paths.lock, { recursive: true, force: true }); throw error; }
   let closingPromise, closed = false, refreshing = false, lastError = null;
   const states = new Map(), sockets = new Map(), tickets = new Map(), joins = new Map(), requests = new Map();
-  async function api(group, route, { body, method = 'GET' } = {}) {
-    return manager.authenticated(group.id, route, { method, body });
+  async function api(group, route, { body, method = 'GET', ...options } = {}) {
+    return manager.authenticated(group.id, route, { ...options, method, body });
   }
   const transfers = new TransferQueue({ manager, fetchState: group => api(group, '/api/state') });
   async function connectedGroup(query) {
@@ -61,10 +62,10 @@ export async function createDaemon({ paths = locations(), managerOptions = {} } 
           socket?.close();
           await api(group, '/api/join', { method: 'POST', body: manager.device });
           if (closed) return;
-          const url = new URL('/api/events', group.baseUrl); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('key', group.key); url.searchParams.set('device', manager.device.id);
+          const url = new URL('/api/events', group.baseUrl); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'; url.searchParams.set('key', group.key); url.searchParams.set('device', manager.device.id); url.searchParams.set('stream', '2');
           socket = new WebSocket(url, { followRedirects: false, handshakeTimeout: 5000, localAddress: manager.getNetwork?.().selected?.address, maxPayload: 16 * 1024 * 1024 }); socket.baseUrl = group.baseUrl;
           socket.on('error', () => {});
-          socket.on('message', bytes => { try { const state = JSON.parse(bytes.toString()); if (state.type === 'state') states.set(group.id, state); } catch {} });
+          socket.on('message', bytes => { try { const state = JSON.parse(bytes.toString()); if (state.type === 'state') states.set(group.id, mergeState(states.get(group.id), state)); } catch {} });
           sockets.set(group.id, socket);
           states.set(group.id, await api(group, '/api/state'));
         }
@@ -117,7 +118,20 @@ export async function createDaemon({ paths = locations(), managerOptions = {} } 
       }
       case 'invite': return manager.createInvite((await connectedGroup(p.group)).id);
       case 'respond': return manager.respondJoin((await connectedGroup(p.group)).id, p.requestId, p.allow);
-      case 'messages': { const group = await connectedGroup(p.group); return api(group, '/api/state'); }
+      case 'messages': {
+        const group = await connectedGroup(p.group);
+        if (p.before === undefined) return api(group, '/api/state');
+        const before = String(p.before);
+        if (!/^\d+$/.test(before) || !Number.isSafeInteger(Number(before)) || Number(before) < 1) throw new Error('历史游标不正确');
+        return api(group, `/api/history?before=${before}&limit=100`);
+      }
+      case 'history': {
+        const group = await connectedGroup(p.group), previous = states.get(group.id) || await api(group, '/api/state');
+        if (!previous.history?.hasMore) return previous;
+        const page = await api(group, `/api/history?before=${encodeURIComponent(previous.history.before)}&limit=100`);
+        const merged = prependHistory(states.get(group.id) || previous, page);
+        states.set(group.id, merged); return merged;
+      }
       case 'text': { const group = await connectedGroup(p.group); return api(group, '/api/messages', { method: 'POST', body: { text: p.text } }); }
       case 'send': {
         const group = groupBy(manager.listGroups(), p.group);
@@ -126,16 +140,34 @@ export async function createDaemon({ paths = locations(), managerOptions = {} } 
         return p.files.map(source => transfers.add('upload', group.id, { source }));
       }
       case 'receive': {
-        const group = await connectedGroup(p.group), state = await api(group, '/api/state');
-        const messages = state.messages.filter(m => m.type === 'file' && (p.all || m.id === p.messageId));
-        if (!messages.length) throw new Error('找不到文件；请指定文件 ID 或使用 --all');
+        const group = await connectedGroup(p.group);
         const directory = await validateDownloadDirectory(p.directory ?? preferences.snapshot().downloadDirectory);
-        const tasks = [];
+        if (!p.all && (typeof p.messageId !== 'string' || !p.messageId)) throw new Error('请指定文件 ID 或使用 --all');
+        let task;
+        if (p.all) {
+          // One queue entry and one active download, regardless of history size.
+          const getMessages = async function* (signal) {
+            let page = await api(group, '/api/state', { signal });
+            for (;;) {
+              signal?.throwIfAborted();
+              for (const message of page.messages || []) if (message.type === 'file') yield message;
+              if (!page.history?.hasMore) break; // Legacy hosts return their entire state.
+              const before = Number(page.history.before);
+              if (!Number.isSafeInteger(before) || before < 1) throw new Error('历史游标不正确');
+              const next = await api(group, `/api/history?before=${before}&limit=100`, { signal });
+              if (next.history?.hasMore && Number(next.history.before) >= before) throw new Error('历史游标没有前进，请重试');
+              page = next;
+            }
+          };
+          task = transfers.add('download-all', group.id, { directory, getMessages });
+        } else {
+          const message = await transfers.fileMetadata(group, p.messageId);
+          task = transfers.add('download', group.id, { messageId: p.messageId, directory, message });
+        }
         try {
-          for (const message of messages) tasks.push(transfers.add('download', group.id, { messageId: message.id, directory }));
           if (p.directory !== undefined) await preferences.remember(directory);
-          return tasks;
-        } catch (error) { for (const task of tasks) transfers.cancel(task.id); throw error; }
+          return [task];
+        } catch (error) { transfers.cancel(task.id); throw error; }
       }
       case 'cancel': transfers.cancel(p.id); return { ok: true };
       case 'retry': transfers.retry(p.id); return { ok: true };
