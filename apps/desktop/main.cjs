@@ -7,9 +7,13 @@ const { createNetworkTransferScope } = require('./network-transfers.cjs');
 const { readClipboardImage } = require('./clipboard-image.cjs');
 const { canPreview, imagePreview } = require('./image-preview.cjs');
 const networkTransfers = createNetworkTransferScope();
+const { desktopBackend, createNativeWindowController } = require('./platform-window.cjs');
+const { nativeFrame } = desktopBackend(process.platform, process.env, app.commandLine);
 const { initialBounds, createWindowController } = require('./window-controller.cjs');
 
 let manager, config, configPath, tray, uiOrigin, uiServer, networkProxy, startupPromise, quitting = false, quitFinished = false, saveQueue = Promise.resolve();
+const welcomeGroup = { id: '__welcome__', name: '拾传', welcome: true, local: false };
+let discoveryError = '';
 const windows = new Map(), opening = new Map(), prepared = new Map(), pending = new Map();
 const cachePins = new Set(), pinCounts = new Map();
 function pinCache(file) {
@@ -45,7 +49,7 @@ function handle(channel, callback) {
   });
 }
 function groupFor(record) {
-  const group = manager.listGroups().find(item => item.id === record.groupId);
+  const group = record.groupId === welcomeGroup.id ? welcomeGroup : manager.listGroups().find(item => item.id === record.groupId);
   if (!group) throw new Error('群不存在');
   return group;
 }
@@ -53,7 +57,7 @@ function publicGroup({ key, ...group }) { return group; }
 function publicGroups() { return manager.listGroups().map(publicGroup); }
 function bootstrap(record) {
   const group = groupFor(record);
-  return { device: config.device, group, room: group, groups: publicGroups(), native: true, platform: process.platform, window: record.control.state(), network: manager.getNetwork() };
+  return { device: config.device, group, room: group, groups: publicGroups(), native: true, platform: process.platform, window: record.control.state(), network: manager.getNetwork(), discoveryError: manager.getNetwork().discoveryError || '' };
 }
 function cacheKey(group, id) { return `${group.id}|${group.key}|${id}`; }
 async function prepareFile(record, id) {
@@ -68,6 +72,11 @@ async function prepareFile(record, id) {
   if (pending.has(key)) return pending.get(key);
   let release, downloadSignal;
   const operation = (async () => {
+    if (group.mode === 'peer') {
+      const releaseLease = manager.acquireTransfer();
+      try { const file = await manager.preparePeerFile(group.id, id); prepared.set(key, file); return file; }
+      finally { releaseLease(); }
+    }
     const hosted = manager.getHostedInbox(group.id);
     if (hosted) {
       const local = hosted.fileFor(id);
@@ -118,6 +127,7 @@ function updateTray() {
     { label: '拾传 · 每个群一个窗口', enabled: false },
     ...manager.listGroups().map(group => ({ label: group.name, click: () => openGroup(group.id).catch(showError) })),
     { type: 'separator' },
+    { label: '新建或加入群', click: () => openGroup(welcomeGroup.id).catch(showError) },
     { label: '显示所有群', click: () => { for (const group of manager.listGroups()) openGroup(group.id).catch(showError); } },
     { label: '退出拾传', click: () => app.quit() },
   ]));
@@ -125,29 +135,29 @@ function updateTray() {
 function showError(error) { console.error(error); if (!quitting) dialog.showErrorBox('拾传', error.message || String(error)); }
 async function openGroup(groupId) {
   if (quitting) return;
-  if (typeof groupId !== 'string' || !manager.listGroups().some(group => group.id === groupId)) throw new Error('群不存在');
+  if (typeof groupId !== 'string' || (groupId !== welcomeGroup.id && !manager.listGroups().some(group => group.id === groupId))) throw new Error('群不存在');
   const existing = windows.get(groupId);
   if (existing && !existing.win.isDestroyed()) { existing.control.expand(true); return publicGroup(groupFor(existing)); }
   if (opening.has(groupId)) return opening.get(groupId);
   const operation = (async () => {
     // Discovery may be temporarily unavailable; keep the saved group available offline.
-    try { await manager.resolveGroup(groupId); } catch (error) { console.warn('Group discovery:', error.message); }
+    try { if (groupId !== welcomeGroup.id) await manager.resolveGroup(groupId); } catch (error) { console.warn('Group discovery:', error.message); }
     if (quitting) return;
-    const group = manager.listGroups().find(item => item.id === groupId);
+    const group = groupId === welcomeGroup.id ? welcomeGroup : manager.listGroups().find(item => item.id === groupId);
     const saved = config.windows[groupId];
     const win = new BrowserWindow({
       ...initialBounds(saved, windows.size), minWidth: 280, minHeight: 340, maxWidth: 900, maxHeight: 1100,
-      title: `${group.name} · 拾传`, icon: path.join(__dirname, 'assets', process.platform === 'darwin' ? 'mac-icon.png' : 'icon.png'), frame: false, roundedCorners: false,
-      transparent: true, backgroundColor: '#00000000', hasShadow: false, fullscreenable: false, resizable: false,
-      autoHideMenuBar: true, alwaysOnTop: true, show: false,
+      title: `${group.name} · 拾传`, icon: path.join(__dirname, 'assets', process.platform === 'darwin' ? 'mac-icon.png' : 'icon.png'), frame: nativeFrame, roundedCorners: nativeFrame,
+      transparent: !nativeFrame, backgroundColor: nativeFrame ? '#F8FAF7' : '#00000000', hasShadow: nativeFrame, fullscreenable: false, resizable: nativeFrame,
+      autoHideMenuBar: true, alwaysOnTop: !nativeFrame, show: false,
       webPreferences: { partition: 'persist:pickdrop-groups', preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true },
     });
-    const control = createWindowController(win, saved, value => {
+    const control = (nativeFrame ? createNativeWindowController : createWindowController)(win, saved, value => {
       config.windows[groupId] = value;
       saveConfig().catch(error => console.error('Save window preferences:', error.message));
     });
     const record = { win, groupId, control, transferReleases: [] }; windows.set(groupId, record);
-    win.setAlwaysOnTop(true, 'floating');
+    if (!nativeFrame) { if (process.platform === 'linux') win.setAlwaysOnTop(true); else win.setAlwaysOnTop(true, 'floating'); }
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     const guardNavigation = (event, url) => { try { if (new URL(url).origin !== uiOrigin) event.preventDefault(); } catch { event.preventDefault(); } };
     win.webContents.on('will-navigate', guardNavigation); win.webContents.on('will-redirect', guardNavigation);
@@ -204,21 +214,28 @@ function registerIPC() {
   handle('group:join', (_record, code) => manager.joinWithCode(code));
   handle('group:join-at', (_record, address, code, groupId) => manager.joinAt(address, code, groupId));
   handle('group:nearby', () => manager.listNearby());
+  handle('group:discovery-status', () => ({ error: manager.getNetwork().discoveryError || '' }));
+  handle('group:rename', (record, name) => manager.renameGroup(record.groupId, name));
+  handle('group:upgrade', record => manager.upgradeGroup(record.groupId));
+  handle('group:reconnect', (record, address) => manager.reconnectGroup(record.groupId, address));
   handle('group:remove-member', (record, id) => manager.removeMember(record.groupId, id));
   handle('group:secure-members', record => manager.secureMembers(record.groupId));
-  const detachGroup = async (record, forget) => {
-    if (groupFor(record).local) throw new Error('托管电脑不能退出或忘记此群；请保留托管服务和文件');
-    await (forget ? manager.forgetGroup(record.groupId) : manager.leaveGroup(record.groupId));
+  const detachGroup = async (record, operation) => {
+    if (pending.size || record.transferReleases.length) throw new Error('有文件正在传输，请完成后再移除群');
+    record.detaching = true;
+    try { await manager[operation](record.groupId); } catch (error) { record.detaching = false; throw error; }
     let next = manager.listGroups()[0];
-    if (!next) next = await manager.createGroup('我的设备');
-    await openGroup(next.id);
-    await sweepCache(record.groupId, true);
+    if (!next) next = welcomeGroup;
+    // Group removal is already durable. Cleanup failure must not strand its window.
+    await sweepCache(record.groupId, true).catch(error => console.warn('Group cache cleanup:', error.message));
     record.win.destroy();
     delete config.windows[record.groupId]; await saveConfig(); updateTray();
+    await openGroup(next.id).catch(async error => { console.warn('Open remaining group:', error.message); await openGroup(welcomeGroup.id); });
     return true;
   };
-  handle('group:leave', record => detachGroup(record, false));
-  handle('group:forget', record => detachGroup(record, true));
+  handle('group:leave', record => detachGroup(record, 'leaveGroup'));
+  handle('group:forget', record => detachGroup(record, 'forgetGroup'));
+  handle('group:delete', record => detachGroup(record, 'deleteGroup'));
   handle('network:get', async () => { await manager.refreshNetwork(); return manager.getNetwork(); });
   handle('network:set', async (_record, value) => {
     if (pending.size) throw new Error('有文件正在接收，请完成后再切换网络');
@@ -320,27 +337,37 @@ else startupPromise = app.whenReady().then(async () => {
     config.windows ||= {};
     await saveConfig();
     const { createGroupManager } = await import('../../server/groups.js');
-    manager = await createGroupManager({ dataDir, device: config.device });
+    manager = await createGroupManager({ dataDir, device: config.device, peerGroups: !(process.env.PICKDROP_USER_DATA && process.env.PICKDROP_TEST_LEGACY_GROUPS === '1') });
     config.device = manager.device; await saveConfig();
     let groups = manager.listGroups();
-    if (!groups.some(group => group.local)) { await manager.createGroup('我的设备'); groups = manager.listGroups(); }
+    if (!groups.length && !config.initialized) { await manager.createGroup('传输群 1'); groups = manager.listGroups(); }
+    config.initialized = true; await saveConfig();
     const { createDesktopUiServer } = await import('../../server/index.js');
     const { createDesktopNetworkProxy } = await import('../../server/desktop-proxy.js');
     uiServer = await createDesktopUiServer(); uiOrigin = uiServer.baseUrl;
     networkProxy = await createDesktopNetworkProxy(manager);
     await session.fromPartition('persist:pickdrop-groups').setProxy({ proxyRules: networkProxy.address, proxyBypassRules: '127.0.0.1;localhost' });
     registerIPC();
-    manager.events.on('groups-changed', () => { broadcast('groups:changed', publicGroups()); updateTray(); });
+    manager.events.on('groups-changed', () => {
+      const available = new Set(manager.listGroups().map(group => group.id));
+      for (const record of windows.values()) {
+        if (record.groupId === welcomeGroup.id || record.detaching || available.has(record.groupId)) continue;
+        record.win.destroy(); delete config.windows[record.groupId];
+      }
+      for (const record of windows.values()) if (!record.detaching && !record.win.isDestroyed()) record.win.webContents.send('groups:changed', publicGroups());
+      updateTray();
+      if (!quitting && !windows.size && uiOrigin) openGroup(manager.listGroups()[0]?.id || welcomeGroup.id).catch(showError);
+    });
     manager.events.on('network-changed', value => { networkTransfers.networkChanged(value); if (value.switching || !value.available) networkProxy.disconnect(); broadcast('network:changed', value); });
     manager.events.on('network-error', error => console.warn('Network:', error.message));
-    manager.events.on('discovery-error', error => console.warn('Discovery:', error.message));
+    manager.events.on('discovery-error', error => { discoveryError = error.message || String(error); broadcast('discovery:error', discoveryError); console.warn('Discovery:', discoveryError); });
     manager.events.on('nearby-changed', () => broadcast('nearby:changed', {}));
     manager.events.on('requests-changed', () => broadcast('requests:changed', {}));
     const trayIcon = nativeImage.createFromPath(path.join(__dirname, 'assets', process.platform === 'darwin' ? 'trayTemplate.png' : 'icon.png'));
     if (process.platform === 'darwin') trayIcon.setTemplateImage(true);
     const sizedTrayIcon = process.platform === 'darwin' ? trayIcon : trayIcon.resize({ width: 20, height: 20 });
     tray = new Tray(sizedTrayIcon); tray.setToolTip('拾传 · 群聊文件投递');
-    tray.on('click', () => { const group = manager.listGroups()[0]; if (group) openGroup(group.id).catch(showError); });
+    tray.on('click', () => { const group = manager.listGroups()[0] || welcomeGroup; openGroup(group.id).catch(showError); });
     updateTray();
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { label: '拾传', submenu: [{ role: 'about' }, { type: 'separator' }, { label: '显示所有群', click: () => { for (const group of manager.listGroups()) openGroup(group.id).catch(showError); } }, { role: 'hide' }, { role: 'quit' }] },
@@ -348,12 +375,12 @@ else startupPromise = app.whenReady().then(async () => {
       { label: '窗口', submenu: [{ role: 'minimize' }, { role: 'zoom' }] },
     ]));
     // Each remembered group is independent; closing a window only hides it.
-    for (const group of groups) await openGroup(group.id);
+    for (const group of groups.length ? groups : [welcomeGroup]) await openGroup(group.id);
   } catch (error) { console.error(error); if (!quitting) { dialog.showErrorBox('拾传无法启动', error.message); app.quit(); } }
 });
 app.on('window-all-closed', () => {});
-app.on('activate', () => { const first = manager?.listGroups()[0]; if (first) openGroup(first.id).catch(showError); });
-app.on('second-instance', () => { const first = manager?.listGroups()[0]; if (first) openGroup(first.id).catch(showError); });
+app.on('activate', () => { const first = manager?.listGroups()[0]; if (manager) openGroup(first?.id || welcomeGroup.id).catch(showError); });
+app.on('second-instance', () => { const first = manager?.listGroups()[0]; if (manager) openGroup(first?.id || welcomeGroup.id).catch(showError); });
 app.on('before-quit', event => {
   if (quitFinished) return;
   event.preventDefault();

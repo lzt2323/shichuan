@@ -27,17 +27,18 @@ export async function verifyLocalFile(filePath, { size, sha256 }) {
 }
 
 /** Downloads to a NEW caller-chosen temporary file; publication is the caller's job. */
-export async function downloadVerified({ url, headers, destination, size, sha256, signal, localAddress, onProgress = () => {}, timeoutMs = 120000 }) {
+export async function downloadVerified({ url, headers, destination, size, sha256, signal, localAddress, onProgress = () => {}, timeoutMs = 120000, responseTimeoutMs = 10000 }) {
   if (!validMetadata(size, sha256)) throw new Error('文件记录无效或已不存在');
   const address = new URL(url);
   if (!['http:', 'https:'].includes(address.protocol) || address.username || address.password) throw new Error('文件地址不正确');
   signal?.throwIfAborted();
   // Acquire ownership before the request. EEXIST never grants permission to delete.
   const file = await fs.open(destination, 'wx', 0o600);
-  let request, response, transportError, complete = false, bytes = 0;
+  let request, response, responseTimer, transportError, complete = false, bytes = 0;
   try {
     response = await new Promise((resolve, reject) => {
-      request = (address.protocol === 'https:' ? https : http).get(address, { headers, signal, localAddress }, resolve);
+      request = (address.protocol === 'https:' ? https : http).get(address, { headers, signal, localAddress }, value => { clearTimeout(responseTimer); resolve(value); });
+      responseTimer = setTimeout(() => { transportError = new Error('文件提供设备连接超时，请稍后重试'); request.destroy(transportError); }, responseTimeoutMs);
       request.setTimeout(timeoutMs, () => { transportError = new Error('下载长时间无响应，请重试'); request.destroy(transportError); });
       request.on('error', error => { transportError = error; reject(error); });
     });
@@ -58,6 +59,7 @@ export async function downloadVerified({ url, headers, destination, size, sha256
   } catch (error) {
     throw transportError || error;
   } finally {
+    clearTimeout(responseTimer);
     if (!complete) { response?.destroy(); request?.destroy(); }
     await file.close().catch(() => {});
     if (!complete) await fs.rm(destination, { force: true });

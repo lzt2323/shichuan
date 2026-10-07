@@ -1,3 +1,4 @@
+import { createMobilePeer } from './peer-client.js';
 import { mergeState } from '../../../shared/history.js';
 import { hmac } from '@noble/hashes/hmac';
 import { sha256 } from '@noble/hashes/sha256';
@@ -24,12 +25,13 @@ export function parseInviteLink(value) {
   const code = params.get('invite'), groupId = params.get('group'), key = params.get('key');
   if (code !== null) {
     if (!/^\d{6}$/.test(code) || (groupId !== null && !UUID.test(groupId))) throw failure('邀请链接不完整，请重新获取二维码');
-    return { baseUrl: url.origin, code, ...(groupId ? { groupId } : {}), legacy: false };
+    return { baseUrl: url.origin, code, ...(params.get('protocol') === 'peer' ? { mode: 'peer' } : {}), ...(groupId ? { groupId } : {}), legacy: false };
   }
   if (!KEY.test(key || '')) throw failure('请使用电脑端生成的完整邀请链接，六位邀请码需要主机地址');
   return { baseUrl: url.origin, key, legacy: true };
 }
 function validateGroup(group) {
+  if (group?.mode === 'peer' && group.authVersion === 3 && UUID.test(group.id) && UUID.test(group.creatorDeviceId) && KEY.test(group.key)) return { id: group.id, name: String(group.name).slice(0, 40), mode: 'peer', authVersion: 3, creatorDeviceId: group.creatorDeviceId, hostDeviceId: group.creatorDeviceId, key: group.key, baseUrl: baseAddress(group.baseUrl).origin };
   if (!UUID.test(group?.id) || !KEY.test(group?.key) || typeof group.name !== 'string' || !group.name.trim() || (!group.legacy && !UUID.test(group.hostDeviceId))) throw failure('保存的群信息不完整，请重新配对');
   return { id: group.id, name: group.name.slice(0, 40), key: group.key, baseUrl: baseAddress(group.baseUrl).origin, ...(group.hostDeviceId ? { hostDeviceId: group.hostDeviceId } : {}), ...(group.legacy ? { legacy: true } : {}), ...(group.authVersion === 2 ? { authVersion: 2 } : {}), ...(group.membershipRevoked ? { membershipRevoked: true } : {}) };
 }
@@ -42,10 +44,11 @@ function delay(ms, signal) {
     signal?.addEventListener('abort', stop, { once: true });
   });
 }
-export function createMobileClient({ storage, randomUUID, deviceName = '我的手机', kind = 'ios', fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, requestTimeoutMs = 10000, reconnectMs = 1500 }) {
+export function createMobileClient({ storage, randomUUID, deviceName = '我的手机', kind = 'ios', fetchImpl = globalThis.fetch, WebSocketImpl = globalThis.WebSocket, requestTimeoutMs = 10000, reconnectMs = 1500, peerOptions }) {
   let session, initialize, writes = Promise.resolve();
   const watches = new Set();
   let discovered = [];
+  const peer = peerOptions ? createMobilePeer({ ...peerOptions, credentials: storage, randomUUID, device: () => client.device, fetchImpl }) : null;
 
   const snapshot = () => ({ ...session, device: { ...session.device }, groups: session.groups.map(group => ({ ...group })) });
   async function persist(next) {
@@ -130,19 +133,36 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
           // Keep the v1 source until a successful v2 commit; retaining it also
           // lets an old build reopen without losing its original connection.
         }
+        for (const group of session.groups) if (group.mode === 'peer' && peer) await peer.restore(group);
         return snapshot();
       })().catch(error => { initialize = null; throw error; });
       return initialize;
     },
     get device() { if (!session) throw failure('手机身份尚未载入'); return { ...session.device }; },
     getSession() { if (!session) throw failure('手机身份尚未载入'); return snapshot(); },
-    listGroups() { return session ? session.groups.map(group => ({ ...group })) : []; },
-    getGroup(id) { const group = session?.groups.find(item => item.id === id); if (!group) throw failure('找不到这个群，请重新加入', 404); return { ...group }; },
+    listGroups() { return session ? session.groups.map(group => ({ ...group, ...(group.mode === 'peer' && peer ? { name: peer.state(group.id).name } : {}) })) : []; },
+    getGroup(id) { const group = session?.groups.find(item => item.id === id); if (!group) throw failure('找不到这个群，请重新加入', 404); return { ...group, ...(group.mode === 'peer' && peer ? { name: peer.state(id).name } : {}) }; },
+    get peerSupported() { return Boolean(peer); },
+    async setPeerActive(value) { await client.init(); if (peer) { if (value) await peer.start(); else await peer.stop(); } },
+    async createGroup(name) { if (!peer) throw failure('去中心群需要更新后的 Android 客户端；Expo Go、网页和当前 iOS 预览不提供节点服务'); await client.init(); const group = await peer.create(name); return remember(group); },
+    async renameGroup(id, name) { if (!peer || client.getGroup(id).mode !== 'peer') throw failure('旧群尚不支持此操作'); await peer.append(id, 'rename', { name }); return mutate(async () => { const groups = session.groups.map(g => g.id === id ? { ...g, name } : g); await persist({ ...session, groups }); }); },
+    async dissolveGroup(id) { await peer.depart(id, 'dissolve'); },
+    peerUpload(id, uri, name, mime, cancelled) { return peer.addFile(id, uri, name, mime, cancelled); },
+    peerFileSources(id, messageId) { return peer.fileSources(id, messageId); },
+    peerReceived(id, message, uri) { return peer.received(id, message, uri); },
     authHeaders(id) { const group = client.getGroup(id); return { 'X-Room-Key': group.key, 'X-Device-Id': client.device.id }; },
-    verifyGroup(id, options = {}) { return authenticate(client.getGroup(id), options.signal); },
+    verifyGroup(id, options = {}) { if (client.getGroup(id).mode === 'peer') { if (!peer) return Promise.reject(failure('此运行环境不支持去中心群')); return Promise.resolve({ groupId: id, hostDeviceId: client.getGroup(id).creatorDeviceId, proof: 'peer' }); } return authenticate(client.getGroup(id), options.signal); },
     async api(id, route, options = {}) {
       if (!route.startsWith('/api/') || route.startsWith('//') || route.includes('#')) throw failure('请求地址不正确');
       const group = client.getGroup(id);
+      if (group.mode === 'peer') {
+        if (!peer) throw failure('此运行环境不支持去中心群');
+        if (route === '/api/join') return client.device;
+        if (route === '/api/state') return peer.state(id);
+        if (route.startsWith('/api/history')) { const params = new URL(route, 'http://localhost').searchParams; return peer.history(id, params.get('before'), Number(params.get('limit')) || 100); }
+        if (route === '/api/messages' && options.method === 'POST') return peer.message(id, options.body.text);
+        throw failure('去中心群不支持此旧接口', 404);
+      }
       const deviceId = client.device.id;
       await authenticate(group, options.signal);
       const currentGroup = client.getGroup(id);
@@ -156,20 +176,23 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
       await persist({ ...session, groups, activeGroupId: session.activeGroupId === id ? groups[0]?.id || null : session.activeGroupId });
       for (const watch of watches) if (watch.groupId === id) watch.close();
       await storage.deleteItemAsync?.(GROUP_PREFIX + id);
+      if (peer) await peer.forget(id);
     }); },
     rename(name) { return mutate(async () => {
       if (!String(name).trim()) throw failure('请输入设备名称');
       const device = { ...session.device, name: String(name).trim().slice(0, 40) };
       await persist({ ...session, device });
-      await Promise.allSettled(session.groups.map(group => client.api(group.id, '/api/join', { method: 'POST', body: device })));
+      await Promise.allSettled(session.groups.map(group => group.mode === 'peer' && peer ? peer.renameDevice(group.id, device.name) : client.api(group.id, '/api/join', { method: 'POST', body: device })));
       return { ...device };
     }); },
     updateDiscovery(records) {
       discovered = Array.isArray(records) ? records.slice(0, 100) : [];
+      peer?.discover(discovered);
       for (const watch of watches) watch.refresh();
     },
     async resolveGroup(id, { signal } = {}) {
       const group = client.getGroup(id);
+      if (group.mode === 'peer') { await peer?.sync(id); return group; }
       let hints = discovered;
       try {
         const directory = new URL(group.baseUrl);
@@ -194,6 +217,7 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
     },
     reconnectAt(id, baseUrl, options = {}) { return mutate(async () => {
       const existing = client.getGroup(id);
+      if (existing.mode === 'peer') { if (!peer) throw failure('此运行环境不支持去中心群'); await peer.connect(id, baseUrl); checkAbort(options.signal); return existing; }
       const candidate = validateGroup({ ...existing, baseUrl: baseAddress(baseUrl).origin });
       // Challenge/proof is checked before credentials are sent or an address is saved.
       await authenticate(candidate, options.signal); checkAbort(options.signal);
@@ -220,14 +244,18 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
       await client.init(); checkAbort(signal);
       const link = parseInviteLink(value);
       if (link.legacy) throw failure('旧版地址请使用兼容连接入口');
+      if (link.mode === 'peer') { if (!peer) throw failure('去中心群需要更新后的 Android 客户端；当前环境仅支持旧版群'); await peer.start(); return peer.requestJoin(link.baseUrl, link.code, { signal, groupId: link.groupId }); }
+      // Address + code can also target a peer node without a full invitation.
+      let peerInfo; try { peerInfo = await request(link.baseUrl, '/api/peer/info', { signal, timeoutMs: 1500 }); } catch (error) { if (signal?.aborted) throw error; }
+      if (peerInfo?.protocol === 'pickdrop-peer-v1') { if (!peer) throw failure('当前运行环境不支持去中心群', 501); await peer.start(); return peer.requestJoin(link.baseUrl, link.code, { signal, groupId: link.groupId }); }
       const ticket = await request(link.baseUrl, '/api/pair/request', { method: 'POST', body: { code: link.code, device: client.device }, signal });
       if ((link.groupId && ticket.groupId !== link.groupId) || !UUID.test(ticket.groupId) || !UUID.test(ticket.requestId) || !UUID.test(ticket.hostDeviceId) || !KEY.test(ticket.pollToken) || !Number.isFinite(ticket.expiresAt)) throw failure('邀请与主机群信息不匹配');
       return { ...ticket, baseUrl: link.baseUrl };
     },
     async checkJoin(ticket, { signal } = {}) {
+      if (ticket?.mode === 'peer') { const result = await peer.checkJoin(ticket, { signal }); if (result.status === 'approved') return { ...result, group: await remember(result.group, signal) }; return result; }
       if (!UUID.test(ticket?.requestId) || !KEY.test(ticket?.pollToken) || !UUID.test(ticket?.groupId)) throw failure('加入申请不完整');
       checkAbort(signal);
-      if (ticket.expiresAt <= Date.now()) return { status: 'expired' };
       const result = await request(baseAddress(ticket.baseUrl).origin, `/api/pair/status/${ticket.requestId}`, { headers: { 'X-Poll-Token': ticket.pollToken }, signal });
       if (!['pending', 'approved', 'denied', 'expired', 'revoked'].includes(result.status)) throw failure('加入申请返回了未知状态');
       if (result.status !== 'approved') return result;
@@ -246,7 +274,6 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
           // through temporary network loss or suspension so foregrounding can
           // receive an approval instead of requiring another invitation.
           if (error.status !== 408 && !(error.status >= 500)) throw error;
-          if (ticket.expiresAt <= Date.now()) throw failure('加入申请已过期，请重新获取邀请链接', 410);
           onStatus?.('pending'); await delay(intervalMs, signal); continue;
         }
         onStatus?.(result.status);
@@ -272,6 +299,7 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
     },
     async createInvite(id, options = {}) {
       const group = client.getGroup(id);
+      if (group.mode === 'peer') return peer.invite(id);
       // Offline v1 migrations retain their local ID. Resolve the server's actual
       // group ID before composing any new short-lived invitation.
       let groupId = group.id;
@@ -284,12 +312,21 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
       return { ...invite, groupId, link: `${group.baseUrl}/#invite=${invite.code}&group=${groupId}` };
     },
     markRevoked(id, expectedKey) { return mutate(async () => { if (client.getGroup(id).key !== expectedKey) return; const groups = session.groups.map(group => group.id === id ? { ...group, membershipRevoked: true } : group); await persist({ ...session, groups }); }); },
-    leaveGroup(id, options = {}) { return client.api(id, '/api/members/leave', { ...options, method: 'POST', body: {} }); },
-    removeMember(id, deviceId, options = {}) { return client.api(id, '/api/members/remove', { ...options, method: 'POST', body: { deviceId } }); },
-    listJoinRequests(id, options = {}) { return client.api(id, '/api/pair/requests', options); },
-    respondJoin(id, requestId, allow, options = {}) { return client.api(id, '/api/pair/respond', { ...options, method: 'POST', body: { requestId, allow } }); },
+    leaveGroup(id, options = {}) { if (client.getGroup(id).mode === 'peer') return peer.depart(id, 'member.leave'); return client.api(id, '/api/members/leave', { ...options, method: 'POST', body: {} }); },
+    removeMember(id, deviceId, options = {}) { if (client.getGroup(id).mode === 'peer') return peer.append(id, 'member.remove', { deviceId }); return client.api(id, '/api/members/remove', { ...options, method: 'POST', body: { deviceId } }); },
+    listJoinRequests(id, options = {}) { if (client.getGroup(id).mode === 'peer') return Promise.resolve(peer.requests(id)); return client.api(id, '/api/pair/requests', options); },
+    respondJoin(id, requestId, allow, options = {}) { if (client.getGroup(id).mode === 'peer') return peer.respond(id, requestId, allow); return client.api(id, '/api/pair/respond', { ...options, method: 'POST', body: { requestId, allow } }); },
     watchGroup(id, { onState, onStatus, onError, active = true } = {}) {
       const initialGroup = client.getGroup(id);
+      if (initialGroup.mode === 'peer') {
+        if (!peer) { onStatus?.('offline'); onError?.(failure('此运行环境不支持去中心群')); return { groupId: id, setActive() {}, close() {} }; }
+        let enabled = active, closed = false;
+        const publishPeer = state => { if (!closed && enabled) { onState?.(state); const member = state.devices.some(item => item.id === client.device.id); onStatus?.(state.dissolved || !member ? 'offline' : peer.isActive() ? 'online' : 'paused'); if (state.dissolved || !member) onError?.(failure(state.dissolved ? '此群已解散，本机历史仍保留' : '已退出或被移除，本机历史仍保留', 403)); } };
+        const unsubscribe = peer.subscribe(id, publishPeer);
+        const refresh = () => { if (!closed && enabled) { publishPeer(peer.state(id)); void peer.sync(id).catch(onError); } };
+        const watch = { groupId: id, refresh, setActive(value) { enabled = Boolean(value); if (enabled) peer.start().then(refresh).catch(onError); else onStatus?.('paused'); }, close() { closed = true; unsubscribe(); watches.delete(watch); } };
+        watches.add(watch); if (enabled) peer.start().then(refresh).catch(onError); return watch;
+      }
       let currentState = { messages: [], devices: [] };
       const publish = next => { currentState = mergeState(currentState, next); onState?.({ ...currentState, mode: next.mode }); };
       let closed = false, enabled = active && !initialGroup.membershipRevoked, generation = 0, socket, timer, handshakeTimer, controller, attempts = 0, connecting = false, connectedUrl, lastHints = '', revoked = Boolean(initialGroup.membershipRevoked);
@@ -341,7 +378,7 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
       }, setActive(value) { if (closed || revoked || enabled === Boolean(value)) return; enabled = Boolean(value); if (enabled) connect(); else { stop(); onStatus?.('paused'); } }, close() { if (closed) return; closed = true; stop(); watches.delete(watch); } };
       watches.add(watch); if (enabled) connect(); else if (revoked) { onStatus?.('offline'); onError?.(failure('设备授权已失效，请重新申请加入；待发草稿仍保留', 401)); } else onStatus?.('paused'); return watch;
     },
-    close() { for (const watch of [...watches]) watch.close(); },
+    close() { for (const watch of [...watches]) watch.close(); void peer?.stop(); },
   };
   return client;
 }
@@ -350,7 +387,7 @@ export function createMobileClient({ storage, randomUUID, deviceName = '我的�
 /** The recipient is an identity, not an IP. A queued file may use a new verified endpoint. */
 export function createVerifiedTransferGroup(client, group, deviceId, maxFileBytes) {
   const locked = { ...group };
-  return { ...locked, deviceId, maxFileBytes, verify: async () => {
+  return { ...locked, deviceId, maxFileBytes, ...(locked.mode === 'peer' ? { peerUpload: (uri, name, mime, cancelled) => client.peerUpload(locked.id, uri, name, mime, cancelled), peerFileSources: messageId => client.peerFileSources(locked.id, messageId), peerReceived: (message, uri) => client.peerReceived(locked.id, message, uri) } : {}), verify: async () => {
     const sameIdentity = () => {
       const current = client.getGroup(locked.id);
       if (current.id !== locked.id || current.hostDeviceId !== locked.hostDeviceId || current.key !== locked.key) throw failure('群设备授权已更新，原草稿不能使用新的授权发送', 409);

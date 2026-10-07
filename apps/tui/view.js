@@ -33,12 +33,21 @@ function gutter(height, key) { return h(Box, { key, width: 1, height, flexDirect
 
 export function chatViewport(snapshot, current, layout) {
   const tasks = groupTransfers(snapshot, current?.id);
-  const featured = tasks.find(t => ['running', 'queued', 'failed'].includes(t.status));
+  const featured = tasks.find(t => ['running', 'queued', 'waiting', 'failed'].includes(t.status));
   const taskRows = layout.kind !== 'wide' && featured ? 2 : 0;
   return { tasks, featured, capacity: Math.max(1, layout.contentHeight - taskRows), taskRows };
 }
-const titles = { settings: '默认保存位置 · 输入目录', 'task-actions': '任务操作 · Enter 确认', 'request-actions': '加入申请 · Enter 确认', actions: '操作菜单', create: '创建群 · 输入群名称', join: '加入群 · 粘贴完整邀请链接', code: '加入群 · 输入 6 位邀请码', groups: '我的传输群', nearby: '附近的群 · 同一局域网', networks: '传输网络', filepath: '输入文件路径 · Enter 浏览 / Tab 补全', files: '选择文件发送', downloads: '选择下载文件', destination: '保存到 · 输入目录', requests: '加入申请 · → 操作', tasks: '当前群任务 · → 操作', devices: '当前群设备', invite: '邀请设备加入', help: '快捷键与说明' };
-export const helpText = '↑↓ 选择消息，←→ 切换工作空间 / 消息 / 操作区域\n工作空间选中即联动；下载、发送、保存按 Enter 确认\n工作空间的发送消息进入编辑；Esc 保留草稿返回\nCtrl+P 操作菜单   Ctrl+G 切换群   Ctrl+O 发文件\nEnter 发送 / 确认   Esc 返回   Ctrl+U 清空输入\nPageUp / PageDown 浏览历史和长内容\n文件选择：↑↓ 移动，Enter 进入目录，空格多选，Ctrl+S 发送\nCtrl+L 输入路径，Tab 补全；SSH 选择的是远端机器的文件。\n下载同名文件自动另存，完成后校验 SHA-256。\n已存入群主机表示上传成功；其他设备需主动下载。\n后台已运行时 Ctrl+C 只退出界面，默认启动退出会停止服务。\npickdrop stop 停止后台；服务重启会中断待处理传输。';
+export const groupRoleLabel = group => group.mode === 'peer' ? (group.canManage ? '本机副本 · 创建者' : '本机副本') : group.local ? '本机托管' : '其他设备托管';
+export function groupManagementEntries(group) {
+  if (!group) return [];
+  const creator = group.mode === 'peer' ? group.canManage : group.local;
+  return [...(creator ? [{id:'rename',label:'重命名群'}, {id:'delete',label:'解散整个群'}] : []),
+    ...(!group.local || group.mode === 'peer' ? [{id:'leave',label:'退出此群'}, {id:'forget',label:'仅从本机移除'}] : []),
+    ...(group.local && group.mode !== 'peer' ? [{id:'upgrade',label:'升级为多设备群'}] : [])];
+}
+export const requestLabel = request => `${request.device.name} · ${request.reset ? '恢复授权（原连接将失效）' : 'Enter 允许 / D 拒绝'}`;
+const titles = { management: '群管理', rename: '修改群名称', confirm: '请确认操作', settings: '默认保存位置 · 输入目录', 'task-actions': '任务操作 · Enter 确认', 'request-actions': '加入申请 · Enter 确认', actions: '操作菜单', create: '创建群 · 输入群名称', join: '加入群 · 粘贴完整邀请链接', code: '加入群 · 输入 6 位邀请码', groups: '我的传输群', nearby: '附近的群 · 同一局域网', networks: '传输网络', filepath: '输入文件路径 · Enter 浏览 / Tab 补全', files: '选择文件发送', downloads: '选择下载文件', destination: '保存到 · 输入目录', requests: '加入申请 · → 操作', tasks: '当前群任务 · → 操作', devices: '当前群设备', invite: '邀请设备加入', help: '快捷键与说明' };
+export const helpText = '↑↓ 选择消息，←→ 切换工作空间 / 消息 / 操作区域\n工作空间选中即联动；下载、发送、保存按 Enter 确认\n工作空间的发送消息进入编辑；Esc 保留草稿返回\nCtrl+P 操作菜单   Ctrl+G 切换群   Ctrl+O 发文件\nEnter 发送 / 确认   Esc 返回   Ctrl+U 清空输入\nPageUp / PageDown 浏览历史和长内容\n文件选择：↑↓ 移动，Enter 进入目录，空格多选，Ctrl+S 发送\nCtrl+L 输入路径，Tab 补全；SSH 选择的是远端机器的文件。\n下载同名文件自动另存，完成后校验 SHA-256。\n已保存到本机副本表示发送成功；其他设备可按需接收。\n后台已运行时 Ctrl+C 只退出界面，默认启动退出会停止服务。\npickdrop stop 停止后台；服务重启会中断待处理传输。';
 export function modeLines({ mode, target, qr, items = [], index = 0, selected = [], snapshot, width, height = Infinity }) {
   const expand = (value, tone) => wrapText(value, width).map(text => row(text, tone));
   if (mode === 'invite') {
@@ -49,7 +58,8 @@ export function modeLines({ mode, target, qr, items = [], index = 0, selected = 
     return output;
   }
   if (mode === 'help') return expand(helpText);
-  if (['create', 'join', 'code', 'destination', 'settings', 'filepath'].includes(mode)) return expand(({ settings: '设置默认下载目录，Enter 保存；不需要先下载文件。', create: '例如：我的传输群', destination: '同名文件会自动另存。成功加入下载队列后记住此目录。', filepath: '输入本机路径，按 Tab 补全，Enter 浏览。', join: '粘贴完整邀请链接；加入申请需要已有群成员确认。', code: '输入邀请码，等待群成员批准。' })[mode], 'muted');
+  if (['rename', 'create', 'join', 'code', 'destination', 'settings', 'filepath'].includes(mode)) return expand(({ rename: '修改共享群名称，仅群创建者可执行。', settings: '设置默认下载目录，Enter 保存；不需要先下载文件。', create: '例如：传输群 1', destination: '同名文件会自动另存。成功加入下载队列后记住此目录。', filepath: '输入本机路径，按 Tab 补全，Enter 浏览。', join: '粘贴完整邀请链接；加入申请需要已有群成员确认。', code: '输入邀请码，等待群成员批准。' })[mode], 'muted');
+  if (mode === 'confirm') return [...expand(target?.description || '', 'warning'), row(''), ...items.map((item, i) => row(`${i === index ? '›' : ' '} ${item.label}`, i === index ? 'accent' : undefined, { selected: i === index, itemIndex: i }))];
   if (!items.length) return expand('暂无内容；Esc 返回，Ctrl+P 选择其他操作。', 'muted');
   const result = [];
   items.forEach((item, i) => {
@@ -68,7 +78,7 @@ export function PickDropScreen({ width = 80, height = 24, snapshot = {}, group, 
   const panels = [];
   let title = mode === 'files' ? `发文件 · ${snapshot.device?.name || '当前机器'}` : titles[mode], content;
   if (mode === 'chat') {
-    title = current ? `${current.name} · ${devices.filter(d => d.online).length} 在线${current.online ? '' : ' · 群主机离线'}` : '欢迎使用拾传';
+    title = current ? `${current.name} · ${devices.filter(d => d.online).length} 在线${current.online ? '' : current.mode === 'peer' ? ' · 暂无连接' : ' · 托管设备离线'}` : '欢迎使用拾传';
     const { tasks, featured, capacity, taskRows } = chatViewport(snapshot, current, layout);
     const all = messageLines(snapshot.state?.messages || [], layout.mainWidth - 4, snapshot.device?.id);
     const clamped = Math.min(offset, Math.max(0, all.length - capacity)), end = all.length - clamped;
@@ -116,7 +126,7 @@ export function PickDropScreen({ width = 80, height = 24, snapshot = {}, group, 
   const routineNotice = notice.startsWith('后台已运行') || notice.startsWith('退出界面会停止');
   const statusParts = notice && !routineNotice ? [notice, ...alerts] : [...alerts, notice || snapshot.discoveryError || ''];
   const status = busy ? '处理中…' : statusParts.filter(Boolean).join('  ·  ') || `${current?.online === false ? '群主机离线' : '就绪'} · ${snapshot.device?.name || '本机'}`;
-  const editable = ['chat', 'create', 'join', 'code', 'destination', 'settings', 'filepath'].includes(mode);
+  const editable = ['rename', 'chat', 'create', 'join', 'code', 'destination', 'settings', 'filepath'].includes(mode);
   const filePrefix = `已选 ${selected.length} 个 · `;
   const inputParts = graphemes(input), inputCursor = Math.min(cursor ?? inputParts.length, inputParts.length);
   let inputStart = inputCursor, available = Math.max(1, columns - 8);

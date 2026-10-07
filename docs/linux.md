@@ -2,18 +2,26 @@
 
 Linux TUI 与 Mac、Windows、Android 使用同一群协议。终端主界面保留多人消息流，文字与文件一起显示，不按文件类型拆分。适用于 Linux 桌面、服务器、小主机和 SSH。此安装包是终端版，不包含 Linux 图形窗口。
 
+## v0.5.0 多端群
+
+Linux TUI 的创建、加入和后台服务已接入与桌面、Android 相同的签名副本协议。创建者退出后，在线 Linux 成员继续文字和文件传输。缺少在线文件副本时，任务进入等待并每 10 秒重试，可以取消；重启 TUI 服务后需重新发起任务。请各端同步升级至 v0.5.0。
+
+群管理支持 `pickdrop rename "新名称" --group ID`、`leave`、`forget`、`delete`、`upgrade`；`delete` 为创建者解散群，`forget` 只移除本机列表，旧群只能在原托管设备 `upgrade`。升级保留旧文件，其他设备需要重新申请。跨子网发现失败时可使用完整邀请链接，或 `join --address 172.29.5.94 --code 123456`；已加入群可用 `reconnect --group ID --address IP[:PORT]` 修复地址。IP 可达仍取决于路由、防火墙和网络隔离。
+
+Linux 当前发行物仍为 TUI。源码运行 Electron 时，X11 提供完整自定义窗口；原生 Wayland 的窗口位置能力有限，详见 [多端群说明](peer-groups.md)。
+
 ## 下载与启动
 
 在同一个 GitHub Release 中选择：
 
-- `PickDrop-0.3.4-Linux-x64-TUI.tar.gz`：常见 Intel / AMD 64 位 Linux。
-- `PickDrop-0.3.4-Linux-arm64-TUI.tar.gz`：64 位 ARM Linux。
+- `PickDrop-0.5.0-Linux-x64-TUI.tar.gz`：常见 Intel / AMD 64 位 Linux。
+- `PickDrop-0.5.0-Linux-arm64-TUI.tar.gz`：64 位 ARM Linux。
 
 解压后进入目录运行 `./pickdrop`。包内已包含 Node.js 24，无需安装 Node、npm、pnpm 或管理员权限。面向 glibc 系统，发布流水线使用 Ubuntu 24.04 对应架构验证；不支持 Alpine/musl，也不是 32 位 ARM 包。若下载后执行位丢失，运行 `chmod +x pickdrop runtime/bin/node`。保留完整目录；不要单独移动启动脚本。
 
 ```sh
-tar -xzf PickDrop-0.3.4-Linux-x64-TUI.tar.gz
-cd PickDrop-0.3.4-Linux-x64-TUI
+tar -xzf PickDrop-0.5.0-Linux-x64-TUI.tar.gz
+cd PickDrop-0.5.0-Linux-x64-TUI
 ./pickdrop
 ```
 
@@ -123,7 +131,7 @@ Esc 按当前层级返回；Ctrl+U 清空输入，Ctrl+C 退出界面。原有 C
 ./pickdrop receive --all --group '工作群' --dir ~/Downloads/拾传 --wait
 ```
 
-上面的邀请链接只展示格式；请使用应用生成的真实链接。`--wait` 等待完成并在失败/取消时返回非零退出码。不带 `--wait` 返回任务 ID，后台继续处理。`messages` 默认返回最新一页，可用 `--before <sequence>` 读取更早消息；终端在历史顶部按 ↑ / PgUp 加载上一页。`receive --all` 按页串行下载历史中仍可用的全部文件，重复执行会另存，不是同步目录或自动订阅。上传完成仅表示群主机已保存，不代表所有成员都已下载。
+上面的邀请链接只展示格式；请使用应用生成的真实链接。`--wait` 等待完成并在失败/取消时返回非零退出码。不带 `--wait` 返回任务 ID，后台继续处理。`messages` 默认返回最新一页，可用 `--before <sequence>` 读取更早消息；终端在历史顶部按 ↑ / PgUp 加载上一页。`receive --all` 按页串行下载历史中仍可用的全部文件，重复执行会另存，不是同步目录或自动订阅。新多端群上传完成表示本机已保存副本，不代表所有成员都已下载；旧群仍表示托管主机已保存。
 
 ## 可选常驻服务
 

@@ -21,7 +21,7 @@ export function createDiscoveryController(adapter, { timeoutMs = 8000, sessionId
   const records = new Map(), lastSeen = new Map(), listeners = new Set();
   const identities = groups => new Set((Array.isArray(groups) ? groups : []).filter(group =>
     !group?.membershipRevoked && UUID.test(group?.id || '') && (!group.hostDeviceId || UUID.test(group.hostDeviceId))
-  ).map(group => `${group.id.toLowerCase()}:${group.hostDeviceId?.toLowerCase() || '*'}`));
+  ).map(group => `${group.id.toLowerCase()}:${group.mode === 'peer' || group.authVersion === 3 ? '*' : group.hostDeviceId?.toLowerCase() || '*'}`));
   let paired = identities(pairedGroups);
   const isPaired = group => paired.has(`${group.groupId}:${group.hostDeviceId}`) || paired.has(`${group.groupId}:*`);
   const emit = patch => { snapshot = { ...snapshot, ...patch }; for (const listener of listeners) listener(snapshot); };

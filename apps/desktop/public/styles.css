@@ -62,3 +62,27 @@ dialog{background:#F8FAF7;color:#2c4738;border-color:#d9e4d3;border-radius:17px;
 .message-meta{color:#62765f}.message-meta span:last-child{color:#6e806a}.date-divider{color:#6e806a}.panel-description,.empty-state p{color:#65775f}.composer input::placeholder{color:#768773}.device-strip,#device-summary,#connection-status{color:#657a62}.member-remove{color:#64775e}.panel-heading button{color:#63775d}.drag-label{color:#5d795d}
 /* Image-first attachments: the photo is the action; secondary commands live in More. */
 .file-info[role=button]{cursor:pointer;border-radius:4px}.file-info[role=button]:focus-visible,.file-thumbnail:focus-visible{outline:2px solid #126a5a;outline-offset:3px}.file-more summary{width:28px;height:30px;letter-spacing:normal}.file-more summary svg{stroke-width:3.4}.file-thumbnail{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;width:100%;height:142px;overflow:hidden;background:#e7eee8;color:#688273;border-radius:8px;margin-bottom:10px;font-size:10px;padding:0}.file-thumbnail img{display:block;width:100%;height:100%;object-fit:cover}.image-file-bubble .file-icon{display:none}.image-file-bubble .file-name{font-size:10.5px}.image-preview-panel{width:min(760px,calc(100vw - 24px));max-width:calc(100vw - 24px)}.image-preview-panel .panel-heading h2{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.image-preview-full{display:block;width:100%;max-height:65vh;object-fit:contain;background:#e9eee9;border-radius:8px}.image-preview-controls{display:flex;flex-wrap:wrap;gap:10px}.image-preview-controls button{padding:10px;border-radius:8px;background:#eaf4ed;color:#126a5a;font-size:11px}
+
+/* A modal's top-layer backdrop is not clipped by .app. Keep native corners clear. */
+dialog::backdrop{border-radius:16px;clip-path:inset(0 round 16px)}
+.panel-input:focus-visible{outline:none;box-shadow:inset 0 0 0 2px #32C6A2;border-color:#32C6A2}
+.group-option-label{display:flex;flex-direction:column;min-width:0;gap:4px}.group-option-label .group-origin{font-size:9px;color:#688575}
+.connection-warning{color:#94623a;background:#fff5e5;border-radius:8px;padding:10px;line-height:1.6;font-size:11px}
+html[data-window-transition=collapse] .app{animation:window-content-out var(--motion-duration,180ms) ease-in both}
+html[data-window-transition=expand] .app{animation:window-content-in var(--motion-duration,240ms) cubic-bezier(.16,1,.3,1) both}
+@keyframes window-content-out{to{opacity:0;filter:blur(1px)}}
+@keyframes window-content-in{from{opacity:0;filter:blur(1px)}to{opacity:1;filter:none}}
+@media(prefers-reduced-motion:reduce){html[data-window-transition] .app{animation:none!important}}
+
+html:is([data-window-transition=expand],[data-window-transition=collapse]) #pickdrop-native-tab{inset:0 auto auto 0!important;width:40px;height:48px;pointer-events:none}
+html[data-window-edge=right]:is([data-window-transition=expand],[data-window-transition=collapse]) #pickdrop-native-tab{left:auto!important;right:0!important}
+html[data-window-edge=top]:is([data-window-transition=expand],[data-window-transition=collapse]) #pickdrop-native-tab{width:64px;height:34px;left:calc(50% - 32px)!important}
+html[data-window-transition=collapse] #pickdrop-native-tab{animation:courier-arrive var(--motion-duration,180ms) ease-out both}
+html[data-window-transition=expand] #pickdrop-native-tab{animation:courier-depart 100ms ease-in both}
+@keyframes courier-arrive{0%,40%{opacity:0}100%{opacity:1}}
+@keyframes courier-depart{to{opacity:0}}
+@media(prefers-reduced-motion:reduce){html[data-window-transition] #pickdrop-native-tab{animation:none!important}}
+
+.join-request-reset-note{margin:5px 0 0;font-size:10px;line-height:1.5;color:#805a30}
+
+html[data-native-frame=true] #pin-button,html[data-native-frame=true] .custom-window-resize-handle,html[data-native-frame=true] #dock-button,html[data-native-frame=true] #close-button{display:none}html[data-native-frame=true] .titlebar{cursor:default}html[data-native-frame=true] .app{border-radius:0}html[data-native-frame=true] dialog::backdrop{clip-path:none;border-radius:0}

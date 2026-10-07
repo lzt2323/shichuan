@@ -10,14 +10,14 @@ export function normalizeDirectory(body, address, now = Date.now()) {
   if (body?.protocol !== 'pickdrop-directory-v1' || !Array.isArray(body.groups)) return [];
   return body.groups.slice(0, 100).flatMap(entry => {
     if (!UUID.test(entry?.groupId || '') || !UUID.test(entry?.hostDeviceId || '') || !Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535) return [];
-    return [{ groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: String(entry.name || '传输群').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 40), port: entry.port, baseUrl: `http://${address}:${entry.port}`, seenAt: now, transport: 'directory' }];
+    return [{ groupId: entry.groupId, hostDeviceId: entry.hostDeviceId, name: String(entry.name || '传输群').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 40), port: entry.port, baseUrl: `http://${address}:${entry.port}`, ...(entry.peerProtocol === 'pickdrop-peer-v1' ? { peerProtocol: entry.peerProtocol } : {}), seenAt: now, transport: 'directory' }];
   });
 }
 
 export async function createDiscoveryDirectory({ address, getAnnouncements, port = DIRECTORY_PORT, onError = () => {} }) {
   const server = http.createServer((req, res) => {
     if (req.method !== 'GET' || req.url !== '/api/discovery/groups') { res.writeHead(404); res.end(); return; }
-    const groups = getAnnouncements().slice(0, 100).map(({ groupId, hostDeviceId, name, port }) => ({ groupId, hostDeviceId, name, port }));
+    const groups = getAnnouncements().slice(0, 100).map(({ groupId, hostDeviceId, name, port, peerProtocol }) => ({ groupId, hostDeviceId, name, port, ...(peerProtocol === 'pickdrop-peer-v1' ? { peerProtocol } : {}) }));
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
     res.end(JSON.stringify({ protocol: 'pickdrop-directory-v1', groups }));
   });
@@ -79,4 +79,34 @@ export async function scanDirectories(network, { signal, onRecord = () => {}, pr
       }
     }
   }));
+}
+
+// A user-specified address is a targeted hint, independent of the bounded /24
+// fallback. The returned endpoints are NOT trusted until the group handshake.
+export function parseConnectionAddress(value) {
+  const input = String(value || '').trim();
+  if (!input || input.length > 2048) throw Object.assign(new Error('请输入对方 IP、IP:端口或完整邀请链接'), { status: 400 });
+  let url;
+  try { url = new URL(input.includes('://') ? input : `http://${input}`); }
+  catch { throw Object.assign(new Error('连接地址不正确，请输入 IP:端口或完整邀请链接'), { status: 400 }); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !url.hostname || url.search || !['', '/'].includes(url.pathname)) {
+    throw Object.assign(new Error('连接地址不正确，请输入 IP:端口或完整邀请链接'), { status: 400 });
+  }
+  const invite = new URLSearchParams(url.hash.slice(1));
+  const code = invite.get('invite'), groupId = invite.get('group');
+  if ((code !== null && !/^\d{6}$/.test(code)) || (groupId !== null && !UUID.test(groupId))) throw Object.assign(new Error('邀请链接不完整，请重新复制'), { status: 400 });
+  // URL.port drops explicit :80/:443, so preserve the user's intent separately.
+  const authority = (input.includes('://') ? input.split('://')[1] : input).split(/[/?#]/)[0];
+  return { origin: url.origin, address: url.hostname, explicitPort: /:\d+$/.test(authority), ...(code ? { code } : {}), ...(groupId ? { groupId } : {}) };
+}
+
+export async function manualGroupCandidates(value, { localAddress, signal, expectedGroupId, probe = probeDirectory } = {}) {
+  const parsed = parseConnectionAddress(value);
+  const wanted = expectedGroupId || parsed.groupId;
+  if (wanted && !UUID.test(wanted)) throw Object.assign(new Error('群编号不正确'), { status: 400 });
+  signal?.throwIfAborted();
+  const records = (await Promise.all([0, 1, 2, 3].map(offset => probe(parsed.address, { port: DIRECTORY_PORT + offset, localAddress, signal, timeoutMs: 700 })))).flat();
+  signal?.throwIfAborted();
+  const hints = records.filter(record => !wanted || record.groupId === wanted).map(record => record.baseUrl);
+  return [...new Set(parsed.explicitPort ? [parsed.origin, ...hints] : [...hints, parsed.origin])].slice(0, 101);
 }

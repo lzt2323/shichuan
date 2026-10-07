@@ -5,9 +5,9 @@ import { readFileSync } from 'node:fs';
 import { mergeState } from '../shared/history.js';
 const source = readFileSync(new URL('../apps/desktop/public/app.js', import.meta.url), 'utf8');
 const receiveCode = source.slice(source.indexOf('function hydrate('), source.indexOf('function renderDevices('));
-function fixture() {
-  const received = [], context = vm.createContext({ mergeState,
-    bridge: { prepareFile: async id => { received.push(id); } }, renderDevices() {}, renderMessages() {},
+function fixture({ failFirst = false } = {}) {
+  const received = [], context = vm.createContext({ mergeState, config: {device: {id: 'self'}},
+    bridge: { prepareFile: async id => { received.push(id); if (failFirst && received.length === 1) throw new Error('等待在线副本'); } }, renderDevices() {}, renderMessages() {},
   });
   vm.runInContext(`let state={messages:[],devices:[]}, historyLoaded=false, epoch=1, preparing=0;
     const observedFiles=new Set(), ready=new Map(), prepareQueue=[], AUTO_RECEIVE_BYTES=8*1024**2;
@@ -31,4 +31,15 @@ test('clearing receive cache does not trigger downloads on later presence snapsh
   const f = fixture(); await f.apply({ mode:'snapshot', messages:[], devices:[] });
   await f.apply({ mode:'delta', messages:[file('small')], devices:[] }); f.clear();
   await f.apply({ mode:'snapshot', messages:[file('small')], devices:[] }); assert.deepEqual(f.received, ['small']);
+});
+
+test('a requested unavailable file retries when a peer comes online, not on every message', async () => {
+  const f = fixture({ failFirst: true });
+  await f.apply({ mode:'snapshot', messages:[], devices:[{id:'peer',online:false}] });
+  await f.apply({ mode:'delta', messages:[file('waiting')], devices:[] });
+  assert.deepEqual(f.received, ['waiting']);
+  await f.apply({ mode:'delta', messages:[], devices:[{id:'peer',online:true}] });
+  assert.deepEqual(f.received, ['waiting', 'waiting']);
+  await f.apply({ mode:'delta', messages:[], devices:[{id:'peer',online:true}] });
+  assert.deepEqual(f.received, ['waiting', 'waiting']);
 });

@@ -56,25 +56,27 @@ function createWindowController(win, saved, persist) {
   let expandedBounds = win.getBounds(), edge = EDGES.includes(saved?.edge) ? saved.edge : null;
   let pinned = Boolean(saved?.pinned), collapsed = false, uiBusy = false, nativeBusy = false, inputBusy = false, dragBusy = false;
   let focused = win.isFocused?.() ?? true, blurTimer;
-  let motionTimer, motionTarget, finishMotion, dragPoll, windowDrag = null, candidateEdge = null, transition = '', reducedMotion = false;
+  let motionTimer, motionTarget, finishMotion, dragPoll, windowDrag = null, candidateEdge = null, transition = '', motionDuration = 0, reducedMotion = false;
   let suppressMoveUntil = 0, hoverTimer, leaveTimer, moveTimer, dragTimer, revealTimer, saveTimer, draggingOut = false;
   const alive = () => !win.isDestroyed();
   const busy = () => pinned || uiBusy || nativeBusy || inputBusy || dragBusy || draggingOut || Boolean(windowDrag) || Boolean(transition);
-  const state = () => ({ pinned, docked: collapsed, collapsed, edge, candidateEdge, moving: Boolean(windowDrag?.moved), transition, accepting: dragBusy, contentWidth: expandedBounds.width, contentHeight: expandedBounds.height });
+  const state = () => ({ pinned, docked: collapsed, collapsed, edge, candidateEdge, moving: Boolean(windowDrag?.moved), transition, motionDuration, accepting: dragBusy, contentWidth: expandedBounds.width, contentHeight: expandedBounds.height });
   const emit = () => { if (alive() && !win.webContents.isDestroyed()) win.webContents.send('window:changed', state()); };
   const save = () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => persist({ bounds: expandedBounds, edge, pinned, collapsed }), 150); };
   function applyBounds(bounds) { if (!alive()) return; suppressMoveUntil = Date.now() + 600; win.setBounds(bounds, false); }
   function stopMotion() {
-    clearInterval(motionTimer); motionTimer = null; transition = ''; motionTarget = null; finishMotion = null;
+    clearInterval(motionTimer); motionTimer = null; transition = ''; motionDuration = 0; motionTarget = null; finishMotion = null;
   }
   function animateBounds(target, kind, done = () => {}) {
     stopMotion();
     if (reducedMotion || !win.isVisible()) { applyBounds(target); done(); emit(); save(); scheduleCollapse(); return; }
-    transition = kind; motionTarget = { ...target }; finishMotion = done; emit();
     const from = win.getBounds(), start = Date.now();
+    const distance = Math.max(Math.abs(target.width - from.width), Math.abs(target.height - from.height));
+    const duration = kind === 'expand' ? Math.min(280, 200 + distance / 10) : kind === 'collapse' ? Math.min(220, 150 + distance / 10) : 180;
+    motionDuration = duration; transition = kind; motionTarget = { ...target }; finishMotion = done; emit();
     motionTimer = setInterval(() => {
       if (!alive()) { stopMotion(); return; }
-      const t = Math.min(1, (Date.now() - start) / 180), eased = 1 - Math.pow(1 - t, 3);
+      const t = Math.min(1, (Date.now() - start) / duration), eased = 1 - Math.pow(1 - t, 3);
       const next = {};
       for (const key of ['x', 'y', 'width', 'height']) next[key] = Math.round(from[key] + (target[key] - from[key]) * eased);
       applyBounds(next);

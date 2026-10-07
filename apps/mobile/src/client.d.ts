@@ -1,10 +1,10 @@
 export type Device = { id: string; name: string; kind: 'desktop' | 'ios' | 'android' | 'web'; online?: boolean };
-export type Group = { id: string; name: string; baseUrl: string; key: string; hostDeviceId?: string; legacy?: boolean; authVersion?: 2; membershipRevoked?: boolean };
+export type Group = { id: string; name: string; baseUrl: string; key: string; hostDeviceId?: string; legacy?: boolean; authVersion?: 2 | 3; mode?: 'peer'; creatorDeviceId?: string; membershipRevoked?: boolean };
 export type Message = { id: string; type: 'text' | 'file'; text?: string; fileName?: string; size?: number; mime?: string; sha256?: string; senderId: string; senderName: string; createdAt: string; seq?: string; deleted?: boolean };
-export type GroupState = { messages: Message[]; devices: Device[]; maxFileBytes?: number; history?: { hasMore: boolean; before: string | null; latest: string | null; total: number }; mode?: 'snapshot' | 'delta'; type?: 'state' };
+export type GroupState = { networkWarning?: string; pendingDeparture?: { type: string; eventId: string; acknowledged: boolean }; dissolved?: boolean; messages: Message[]; devices: Device[]; maxFileBytes?: number; history?: { hasMore: boolean; before: string | null; latest: string | null; total: number }; mode?: 'snapshot' | 'delta'; type?: 'state' };
 export type ConnectionStatus = 'connecting' | 'online' | 'offline' | 'paused';
 export type JoinStatus = 'pending' | 'approved' | 'denied' | 'expired' | 'revoked';
-export type JoinTicket = { status: 'pending'; requestId: string; pollToken: string; groupId: string; groupName: string; hostDeviceId: string; expiresAt: number; baseUrl: string };
+export type JoinTicket = { mode?: 'peer'; status: 'pending'; requestId: string; pollToken: string; groupId: string; groupName: string; hostDeviceId: string; expiresAt: number; baseUrl: string };
 export type JoinRequest = { id: string; requestId: string; device: Device; createdAt: number; expiresAt: number; status: JoinStatus };
 export type Invite = { code: string; expiresAt: number; groupId: string; link: string };
 export type Session = { device: Device; groups: Group[]; activeGroupId: string | null };
@@ -13,6 +13,14 @@ export type RequestOptions = { method?: string; body?: unknown; headers?: Record
 export type JoinOptions = { signal?: AbortSignal; onStatus?: (status: JoinStatus) => void; intervalMs?: number };
 export type GroupWatch = { groupId: string; setActive(active: boolean): void; close(): void };
 export type MobileClient = {
+  readonly peerSupported: boolean;
+  setPeerActive(active: boolean): Promise<void>;
+  createGroup(name: string): Promise<Group>;
+  renameGroup(id: string, name: string): Promise<void>;
+  dissolveGroup(id: string): Promise<void>;
+  peerUpload(id: string, uri: string, name: string, mime?: string, cancelled?: () => boolean): Promise<{ id: string; size: number }>;
+  peerFileSources(id: string, messageId: string): Promise<{ localUri?: string; sources: Array<{ url: string; headers: Record<string, string> }> }>;
+  peerReceived(id: string, message: Message, uri: string): Promise<unknown>;
   init(): Promise<Session>;
   readonly device: Device;
   getSession(): Session;
@@ -41,7 +49,7 @@ export type MobileClient = {
   watchGroup(id: string, options?: { onState?: (state: GroupState) => void; onStatus?: (status: ConnectionStatus) => void; onError?: (error: Error) => void; active?: boolean }): GroupWatch;
   close(): void;
 };
-export function parseInviteLink(value: string): { baseUrl: string; code: string; groupId?: string; legacy: false } | { baseUrl: string; key: string; legacy: true };
-export function createMobileClient(options: { storage: Storage; randomUUID: () => string; deviceName?: string; kind?: Device['kind']; fetchImpl?: typeof fetch; WebSocketImpl?: typeof WebSocket; requestTimeoutMs?: number; reconnectMs?: number }): MobileClient;
+export function parseInviteLink(value: string): { baseUrl: string; code: string; groupId?: string; mode?: 'peer'; legacy: false } | { baseUrl: string; key: string; legacy: true };
+export function createMobileClient(options: { storage: Storage; peerOptions?: any; randomUUID: () => string; deviceName?: string; kind?: Device['kind']; fetchImpl?: typeof fetch; WebSocketImpl?: typeof WebSocket; requestTimeoutMs?: number; reconnectMs?: number }): MobileClient;
 
-export function createVerifiedTransferGroup(client: MobileClient, group: Group, deviceId: string, maxFileBytes?: number): Group & { deviceId: string; maxFileBytes?: number; verify(): Promise<{ baseUrl: string }> };
+export function createVerifiedTransferGroup(client: MobileClient, group: Group, deviceId: string, maxFileBytes?: number): Group & { deviceId: string; maxFileBytes?: number; peerUpload?: (uri: string, name: string, mime?: string, cancelled?: () => boolean) => Promise<{ id: string; size: number }>; peerFileSources?: (messageId: string) => Promise<{ localUri?: string; sources: Array<{ url: string; headers: Record<string, string> }> }>; peerReceived?: (message: { id: string; size?: number; sha256?: string }, uri: string) => Promise<unknown>; verify(): Promise<{ baseUrl: string }> };

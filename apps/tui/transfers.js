@@ -9,7 +9,7 @@ import { safeFileName } from '../../shared/protocol.js';
 import { downloadVerified } from '../../shared/download.js';
 
 export class TransferQueue {
-  constructor({ manager, onChange = () => {}, fetchState }) { this.manager = manager; this.onChange = onChange; this.fetchState = fetchState; this.tasks = new Map(); this.running = false; }
+  constructor({ manager, onChange = () => {}, fetchState }) { this.manager = manager; this.onChange = onChange; this.fetchState = fetchState; this.tasks = new Map(); this.running = false; this.closed = false; this.retryTimer = setInterval(() => { if (this.closed) return; let ready = false; for (const task of this.tasks.values()) if (task.status === "waiting") { task.status = "queued"; ready = true; } if (ready) void this.pump(); }, 10000); this.retryTimer.unref(); }
   list() { return [...this.tasks.values()].map(({ controller, source, directory, getMessages, message, ...task }) => task); }
   add(type, groupId, values) {
     const task = { id: randomUUID(), type, groupId, ...values, name: type === 'upload' ? path.basename(values.source) : type === 'download-all' ? '全部群文件' : values.messageId, status: 'queued', bytes: 0, total: 0, createdAt: Date.now() };
@@ -17,9 +17,9 @@ export class TransferQueue {
     if (this.tasks.size >= 200) { const old = [...this.tasks.values()].find(t => ['done', 'failed', 'cancelled'].includes(t.status)); if (old) this.tasks.delete(old.id); else throw new Error('传输队列已满'); }
     this.tasks.set(task.id, task); this.onChange(); void this.pump(); return { id: task.id };
   }
-  cancel(id) { const task = this.tasks.get(id); if (!task) throw new Error('找不到传输任务'); if (!['queued', 'running'].includes(task.status)) return; task.status = 'cancelled'; task.controller?.abort(); this.onChange(); }
-  retry(id) { const task = this.tasks.get(id); if (!task || !['failed', 'cancelled'].includes(task.status)) throw new Error('只能重试失败或取消的传输'); task.bytes = 0; task.error = undefined; task.status = 'queued'; this.onChange(); void this.pump(); }
-  async close() { for (const task of this.tasks.values()) this.cancel(task.id); while (this.running) await new Promise(r => setTimeout(r, 20)); }
+  cancel(id) { const task = this.tasks.get(id); if (!task) throw new Error('找不到传输任务'); if (!['queued', 'running', 'waiting'].includes(task.status)) return; task.status = 'cancelled'; task.controller?.abort(); this.onChange(); }
+  retry(id) { const task = this.tasks.get(id); if (!task || !['failed', 'cancelled', 'waiting'].includes(task.status)) throw new Error('只能重试失败或取消的传输'); task.bytes = 0; task.error = undefined; task.status = 'queued'; this.onChange(); void this.pump(); }
+  async close() { this.closed = true; clearInterval(this.retryTimer); for (const task of this.tasks.values()) this.cancel(task.id); while (this.running) await new Promise(r => setTimeout(r, 20)); }
   async pump() {
     if (this.running) return; this.running = true;
     try {
@@ -37,7 +37,7 @@ export class TransferQueue {
           else if (task.type === 'download-all') await this.downloadAll(task, group, headers);
           else await this.download(task, group, headers, task.message);
           if (task.status !== 'cancelled') task.status = 'done';
-        } catch (error) { if (task.status !== 'cancelled') { task.status = 'failed'; task.error = error.message; } }
+        } catch (error) { if (task.status !== 'cancelled') { task.status = error.status === 503 && task.type !== 'upload' && this.manager.listGroups().find(g => g.id === task.groupId)?.mode === 'peer' ? 'waiting' : 'failed'; task.error = error.message; } }
         finally { release?.(); task.controller = undefined; this.onChange(); }
       }
     } finally { this.running = false; }
@@ -71,7 +71,7 @@ export class TransferQueue {
       const result = await Promise.all([responsePromise, pipeline(file.createReadStream({ autoClose: false }), this.meter(task, hash), request, { signal: task.controller.signal })]);
       const message = result[0];
       if (message.size !== task.bytes || message.sha256 !== hash.digest('hex')) throw new Error('上传校验失败，请检查群内文件后重新发送');
-      task.messageId = message.id; task.result = '已上传到群主机';
+      task.messageId = message.id; task.result = group.mode === 'peer' ? '已保存本机副本，群成员可按需接收' : '已上传到群主机';
     } finally { await file.close(); }
   }
   async downloadAll(task, group, headers) {
@@ -103,6 +103,8 @@ export class TransferQueue {
     await fs.mkdir(task.directory, { recursive: true, mode: 0o700 });
     const partial = path.join(task.directory, `.pickdrop-${randomUUID()}.partial`);
     try {
+      if (group.mode === 'peer') await this.manager.preparePeerFile(group.id, message.id, { signal: task.controller.signal });
+      task.controller.signal.throwIfAborted();
       const url = new URL('/api/files/' + encodeURIComponent(message.id), group.baseUrl);
       let last = 0;
       await downloadVerified({ url, headers, destination: partial, size: message.size, sha256: message.sha256,

@@ -100,7 +100,7 @@ function actionRows({ message, snapshot, current, actionIndex, active, width, he
   }
   if (!short) rows.push(row());
   const actions = message.type === 'file' ? [...fileActions] : textActions;
-  if (message.type === 'file' && task) actions[0] = ['queued', 'running'].includes(task.status) ? '正在下载' : task.status === 'done' ? '查看保存位置' : task.status === 'failed' ? '重试下载' : '下载文件';
+  if (message.type === 'file' && task) actions[0] = task.status === 'waiting' ? '等待在线副本' : ['queued', 'running'].includes(task.status) ? '正在下载' : task.status === 'done' ? '查看保存位置' : task.status === 'failed' ? '重试下载' : '下载文件';
   actions.forEach((label, index) => rows.push(row(`${active && actionIndex === index ? '›' : ' '} ${label}`, active && actionIndex === index ? 'accent' : 'text', { focus: active && actionIndex === index, bold: active && actionIndex === index })));
   if (!short) rows.push(row(), row(active ? 'Enter 执行 · ← 返回消息' : '→ 移入操作区', 'muted'));
   if (rows.length > height) {

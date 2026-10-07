@@ -9,10 +9,10 @@ import { bytesToHex, utf8ToBytes } from '@noble/hashes/utils';
 import { safeFileName } from '../../../shared/protocol';
 import { assertFileMetadata, assertLocalShareUri, byteProgress } from './transfer-utils';
 
-export type TransferGroup = { id: string; name?: string; baseUrl: string; key: string; deviceId: string; hostDeviceId?: string; authVersion?: 2; maxFileBytes?: number; verify?: () => Promise<void | { baseUrl: string }> };
+export type TransferGroup = { id: string; name?: string; baseUrl: string; key: string; deviceId: string; hostDeviceId?: string; authVersion?: 2 | 3; mode?: 'peer'; peerUpload?: (uri: string, name: string, mime?: string, cancelled?: () => boolean) => Promise<{ id: string; size: number }>; peerFileSources?: (id: string) => Promise<{ localUri?: string; sources: Array<{ url: string; headers: Record<string, string> }> }>; peerReceived?: (message: TransferMessage, uri: string) => Promise<unknown>; maxFileBytes?: number; verify?: () => Promise<void | { baseUrl: string }> };
 export type IncomingAsset = { uri: string; name?: string; mimeType?: string; size?: number };
 export type TransferMessage = { id: string; fileName?: string; size?: number; mime?: string; sha256?: string };
-export type TransferStatus = 'preparing' | 'draft' | 'queued' | 'uploading' | 'downloading' | 'verifying' | 'completed' | 'saving' | 'save-cancelled' | 'orphaned' | 'failed' | 'cancelled';
+export type TransferStatus = 'preparing' | 'draft' | 'queued' | 'uploading' | 'downloading' | 'verifying' | 'completed' | 'saving' | 'save-cancelled' | 'waiting' | 'orphaned' | 'failed' | 'cancelled';
 export type TransferItem = {
   id: string; groupId: string; groupName: string; direction: 'upload' | 'download'; name: string;
   size: number; status: TransferStatus; bytesTransferred: number; totalBytes?: number; progress?: number;
@@ -27,8 +27,8 @@ const digestKey = (value: string) => bytesToHex(sha256(utf8ToBytes(value)));
 const yieldToUI = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const errorText = (error: unknown) => error instanceof Error ? error.message : '传输失败，请重试';
 const isActive = (status: TransferStatus) => ['preparing', 'queued', 'uploading', 'downloading', 'verifying', 'saving'].includes(status);
-function directory(kind: 'drafts' | 'received') {
-  const root = kind === 'drafts' ? FS.documentDirectory : FS.cacheDirectory;
+function directory(kind: 'drafts' | 'received' | 'waiting') {
+  const root = kind === 'received' ? FS.cacheDirectory : FS.documentDirectory;
   if (!root) throw new Error('当前设备无法使用本地文件目录');
   return `${root}PickDrop/${kind}/`;
 }
@@ -159,6 +159,17 @@ export class TransferManager {
           item: { id, groupId: 'orphaned', groupName: '未关联群草稿', direction: 'upload', name, localUri, size, status: 'orphaned', bytesTransferred: 0 } });
       }
     }
+    const waitingRoot = directory('waiting'); await FS.makeDirectoryAsync(waitingRoot, { intermediates: true });
+    for (const file of await FS.readDirectoryAsync(waitingRoot)) {
+      if (!/^[a-f0-9-]{36}\.json$/.test(file)) continue;
+      try {
+        const saved = JSON.parse(await FS.readAsStringAsync(waitingRoot + file));
+        const group = groups.find(group => group.id === saved.groupId && group.key && digestKey(group.key) === saved.credentialHash);
+        if (!group || this.tasks.has(saved.id) || file !== saved.id + '.json') continue;
+        assertFileMetadata(saved.message);
+        this.tasks.set(saved.id, { group: freezeGroup(group), message: saved.message, cancelled: false, item: { id: saved.id, groupId: group.id, groupName: group.name || '传输群', messageId: saved.message.id, direction: 'download', action: saved.action, name: safeFileName(saved.message.fileName), mimeType: saved.message.mime, size: saved.message.size, status: 'waiting', bytesTransferred: 0 } });
+      } catch { /* Keep unreadable task metadata for diagnosis; do not fetch it. */ }
+    }
     this.emit();
     await this.cleanCache();
   }
@@ -229,13 +240,13 @@ export class TransferManager {
   }
   async retry(id: string): Promise<void> {
     await this.running.get(id);
-    const task = this.tasks.get(id); if (!task || !['failed', 'cancelled', 'save-cancelled'].includes(task.item.status)) return;
+    const task = this.tasks.get(id); if (!task || !['failed', 'cancelled', 'save-cancelled', 'waiting'].includes(task.item.status)) return;
     if (task.item.direction === 'upload' && !task.item.localUri) { task.cancelled = false; this.update(task, { status: 'preparing', error: undefined }); const preparing = this.prepare(task).finally(() => this.running.delete(id)); this.running.set(id, preparing); await preparing; return; }
     await this.start(id);
   }
   async cancel(id: string): Promise<void> {
     const task = this.tasks.get(id); if (!task || ['orphaned', 'completed', 'saving'].includes(task.item.status)) return;
-    task.cancelled = true; this.update(task, { status: 'cancelled', error: undefined, progress: undefined });
+    task.cancelled = true; if (task.item.direction === 'download') await deleteQuietly(directory('waiting') + id + '.json'); this.update(task, { status: 'cancelled', error: undefined, progress: undefined });
     try { await task.native?.cancelAsync(); } catch { /* The request can already have settled. */ }
   }
   async remove(id: string): Promise<void> {
@@ -246,15 +257,21 @@ export class TransferManager {
     if (!waiting) await this.running.get(id);
     const task = this.tasks.get(id);
     if (task?.folder && task.item.direction === 'upload') await deleteQuietly(task.folder);
-    this.tasks.delete(id); this.emit();
+    this.tasks.delete(id); await deleteQuietly(directory('waiting') + id + '.json'); this.emit();
   }
 
   async receive(group: TransferGroup, message: TransferMessage, action: 'save' | 'file' | 'share' = 'save'): Promise<string> {
     const locked = freezeGroup(group); assertFileMetadata(message);
-    const existing = [...this.tasks.values()].find(task => task.group.id === locked.id && task.group.hostDeviceId === locked.hostDeviceId && task.item.direction === 'download' && task.item.messageId === message.id && (isActive(task.item.status) || this.running.has(task.item.id)));
+    const existing = [...this.tasks.values()].find(task => task.group.id === locked.id && task.group.hostDeviceId === locked.hostDeviceId && task.item.direction === 'download' && task.item.messageId === message.id && (isActive(task.item.status) || task.item.status === 'waiting' || this.running.has(task.item.id)));
     if (existing) return existing.item.id;
     const id = randomUUID();
     const task: Task = { group: locked, message: { ...message }, cancelled: false, item: { id, groupId: locked.id, groupName: locked.name || '传输群', messageId: message.id, direction: 'download', action, mimeType: message.mime, name: safeFileName(message.fileName), size: message.size!, status: 'draft', bytesTransferred: 0 } };
+    if (locked.mode === 'peer') {
+      const root = directory('waiting'); await FS.makeDirectoryAsync(root, { intermediates: true });
+      const temporary = root + id + '.tmp';
+      await FS.writeAsStringAsync(temporary, JSON.stringify({ id, groupId: locked.id, credentialHash: digestKey(locked.key), message, action }));
+      await FS.moveAsync({ from: temporary, to: root + id + '.json' });
+    }
     this.tasks.set(id, task); this.emit(); void this.start(id); return id;
   }
   /** Returns only a verified local file. The caller must release the displayed image on unmount. */
@@ -309,10 +326,13 @@ export class TransferManager {
       if (task.item.localUri) this.update(task, { status: 'orphaned', groupName: '未关联群草稿' });
     }
   }
+  retryWaiting(groupId?: string) {
+    for (const task of this.tasks.values()) if (task.item.status === 'waiting' && (!groupId || task.item.groupId === groupId)) void this.start(task.item.id);
+  }
   private async run(task: Task) {
     try { if (task.item.direction === 'upload') await this.upload(task); else await this.download(task); }
-    catch (error) { this.update(task, { status: task.cancelled ? 'cancelled' : 'failed', error: task.cancelled ? undefined : errorText(error), progress: undefined }); }
-    finally { if (task.item.direction === 'download') await this.cleanCache().catch(() => {}); }
+    catch (error) { this.update(task, { status: task.cancelled ? 'cancelled' : (error as { waiting?: boolean })?.waiting ? 'waiting' : 'failed', error: task.cancelled ? undefined : errorText(error), progress: undefined }); }
+    finally { if (task.item.direction === 'download') { if (['completed', 'cancelled', 'save-cancelled'].includes(task.item.status)) await deleteQuietly(directory('waiting') + task.item.id + '.json'); await this.cleanCache().catch(() => {}); } }
   }
   private async upload(task: Task) {
     if (!task.item.localUri) throw new Error('本地草稿已失效，请重新选择文件');
@@ -323,6 +343,15 @@ export class TransferManager {
     this.update(task, { status: 'uploading' });
     const verified = await task.group.verify?.(); checkCancelled(task);
     if (verified?.baseUrl) task.group = freezeGroup({ ...task.group, baseUrl: verified.baseUrl });
+    if (task.group.mode === 'peer') {
+      if (!task.group.peerUpload) throw new Error('当前运行环境不支持去中心文件提供');
+      const response = await task.group.peerUpload(task.item.localUri, task.item.name, task.asset?.mimeType, () => task.cancelled);
+      checkCancelled(task);
+      if (!response.id || response.size !== task.item.size) throw new Error('本地文件未完整保存');
+      this.update(task, { status: 'completed', messageId: response.id, localUri: undefined });
+      if (task.folder) await deleteQuietly(task.folder);
+      return;
+    }
     const native = FS.createUploadTask(`${task.group.baseUrl}/api/files?name=${encodeURIComponent(task.item.name)}`, task.item.localUri, { httpMethod: 'POST', uploadType: FS.FileSystemUploadType.BINARY_CONTENT, sessionType: FS.FileSystemSessionType.FOREGROUND, headers: { 'X-Room-Key': task.group.key, 'X-Device-Id': task.group.deviceId, 'Content-Type': task.asset?.mimeType || 'application/octet-stream' } }, data => this.progress(task, data.totalBytesSent, data.totalBytesExpectedToSend));
     task.native = native;
     const result = await native.uploadAsync(); checkCancelled(task);
@@ -379,14 +408,26 @@ export class TransferManager {
         this.update(task, { status: 'downloading', progress: undefined });
         const verified = await task.group.verify?.(); checkCancelled(task);
         if (verified?.baseUrl) task.group = freezeGroup({ ...task.group, baseUrl: verified.baseUrl });
-        const native = FS.createDownloadResumable(`${task.group.baseUrl}/api/files/${encodeURIComponent(message.id)}`, partial, { headers: { 'X-Room-Key': task.group.key, 'X-Device-Id': task.group.deviceId }, sessionType: FS.FileSystemSessionType.FOREGROUND }, data => this.progress(task, data.totalBytesWritten, data.totalBytesExpectedToWrite));
-        task.native = native;
+        const peer = task.group.mode === 'peer' ? await task.group.peerFileSources?.(message.id) : undefined;
+        if (task.group.mode === 'peer' && !peer) throw new Error('当前环境不支持去中心文件接收');
+        const sources = peer?.sources || [{ url: `${task.group.baseUrl}/api/files/${encodeURIComponent(message.id)}`, headers: { 'X-Room-Key': task.group.key, 'X-Device-Id': task.group.deviceId } }];
+        let received = false, lastError: unknown;
         try {
-          const result = await native.downloadAsync(); checkCancelled(task);
-          if (!result || result.status !== 200) throw new Error(`接收失败${result ? `（${result.status}）` : ''}，请重试`);
-          this.update(task, { status: 'verifying', progress: undefined });
-          await verifyFile(partial, message, task); checkCancelled(task);
+          if (peer?.localUri) { await FS.copyAsync({ from: peer.localUri, to: partial }); await verifyFile(partial, message, task); received = true; }
+          else for (const source of sources) {
+            checkCancelled(task);
+            const native = FS.createDownloadResumable(source.url, partial, { headers: source.headers, sessionType: FS.FileSystemSessionType.FOREGROUND }, data => this.progress(task, data.totalBytesWritten, data.totalBytesExpectedToWrite));
+            task.native = native;
+            try {
+              const result = await native.downloadAsync(); checkCancelled(task);
+              if (!result || result.status !== 200) throw new Error(`接收失败${result ? `（${result.status}）` : ''}，请重试`);
+              this.update(task, { status: 'verifying', progress: undefined });
+              await verifyFile(partial, message, task); checkCancelled(task); received = true; break;
+            } catch (error) { lastError = error; checkCancelled(task); await deleteQuietly(partial); }
+          }
+          if (!received) { if (peer) throw Object.assign(new Error('等待持有文件的设备上线；应用在前台时自动重试'), { waiting: true }); throw lastError || new Error('接收失败，请重试'); }
           await FS.moveAsync({ from: partial, to: target });
+          if (peer) await task.group.peerReceived?.(message, target);
         } finally { await deleteQuietly(partial); }
       }
       checkCancelled(task);
